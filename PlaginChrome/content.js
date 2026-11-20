@@ -1,13 +1,6 @@
 (() => {
   "use strict";
 
-  // ============================================================
-  //  НОВОЕ: guard — регистрируемся ТОЛЬКО на chat.deepseek.com.
-  //  Скрипт может быть внедрён и на других страницах, если
-  //  matches в manifest.json слишком широкий; на любой
-  //  странице вне chat.deepseek.com молча выходим, не
-  //  регистрируемся, не шлём /log, не открываем SSE.
-  // ============================================================
   const DS_HOST = "chat.deepseek.com";
 
   function isDeepSeekPage() {
@@ -19,8 +12,8 @@
     }
   }
 
-  if (!isDeepSeekPage()) return;              // не наш URL — до свидания
-  if (window.top !== window) return;          // не регистрируемся из iframe
+  if (!isDeepSeekPage()) return;
+  if (window.top !== window) return;
 
   const CHANNEL    = "__ds_stream_chunk__";
   const EVT_EXEC   = "__ds_execute_cmd__";
@@ -42,7 +35,6 @@
 
   let postQueue = Promise.resolve();
   function postLog(level, text, streamId, streamType) {
-    // НОВОЕ: не шлём логи с неверного URL
     if (!isDeepSeekPage()) return postQueue;
     const payload = { level, text, tabId: TAB_ID };
     if (streamId) payload.streamId = streamId;
@@ -58,11 +50,7 @@
     return postQueue;
   }
 
-  // ============================================================
-  //  НОВОЕ: надёжная отправка tab-op лога даже при закрытии вкладки
-  // ============================================================
   function postTabOp(text) {
-    // НОВОЕ: не шлём tab-op с неверного URL
     if (!isDeepSeekPage()) return;
     try {
       const body = JSON.stringify({ level: "tab-op", text, tabId: TAB_ID });
@@ -82,10 +70,6 @@
     } catch (_) {}
   }
 
-  // ---------- уведомление сервера о закрытии вкладки ----------
-  // sendBye НЕ оборачиваем в isDeepSeekPage(): он вызывается ровно
-  // в момент выгрузки страницы, когда URL ещё старый. Нам важно,
-  // чтобы сервер снял регистрацию.
   let byeSent = false;
   function sendBye(reason) {
     if (byeSent) return;
@@ -125,7 +109,6 @@
     sendBye("unload");
   }, { capture: true });
 
-  // ---------- стримы (без изменений) ----------
   const streams = new Map();
 
   function getStream(streamId) {
@@ -250,10 +233,10 @@
   });
 
   window.addEventListener(EVT_CONSOLE, (evt) => {
-      const { level = "log", text = "" } = evt.detail || {};
-      if (!text || !text.trim()) return;
-      // сервер реагирует только на "console-error"; маппим error → console-error
-      postLog(level === "error" ? "console-error" : level, text);
+    const { level = "log", text = "" } = evt.detail || {};
+    if (!text || !text.trim()) return;
+    // Сервер реагирует только на "console-error"; маппим error → console-error
+    postLog(level === "error" ? "console-error" : level, text);
   });
 
   window.addEventListener(EVT_RESULT, (evt) => {
@@ -290,10 +273,6 @@
   window.addEventListener(EVT_READY, flushPending);
   setTimeout(() => { if (!ready) flushPending(); }, 1000);
 
-  // ============================================================
-  //  НОВОЕ: регистрация с background для управления вкладками
-  //  (только если мы всё ещё на chat.deepseek.com)
-  // ============================================================
   function registerWithBackground() {
     if (!isDeepSeekPage()) return;
     try {
@@ -304,15 +283,9 @@
     } catch (_) {}
   }
   registerWithBackground();
-  // service worker в MV3 может «засыпать» — периодически напоминаем о себе
   setInterval(registerWithBackground, 30000);
 
-  // ============================================================
-  //  НОВОЕ: обработчик команд управления вкладками
-  // ============================================================
   function handleTabCommand(cmd) {
-    // НОВОЕ: если вдруг URL сменился (SPA-навигация), команды
-    // управления вкладками всё равно шлём только с deepseek
     if (!isDeepSeekPage()) return;
 
     const type = cmd && cmd.type;
@@ -344,13 +317,12 @@
         postTabOp("closeTab: empty tabId");
         return;
       }
-      // Сразу сообщаем Java (если закрываем себя — успеем до unload)
       postTabOp("closing: " + target);
       try {
         chrome.runtime.sendMessage({ type: "close_tab", tabId: target }, (resp) => {
-          if (chrome.runtime.lastError) return; // себя закрыли — колбэк может не сработать
+          if (chrome.runtime.lastError) return;
           if (resp && resp.ok) {
-            // успешное закрытие уже отрапортовано выше
+            // уже отрапортовано выше
           } else {
             postTabOp("closeTab error: " + (resp && resp.error || "unknown"));
           }
@@ -379,7 +351,6 @@
     }
   }
 
-  // ---------- SSE ----------
   let es = null;
   let reconnectTimer = null;
 
@@ -399,8 +370,6 @@
   }
 
   function connectSSE() {
-    // НОВОЕ: если URL внезапно стал не-deepseek (SPA-навигация / уход со страницы),
-    // не открываем EventSource
     if (!isDeepSeekPage()) return;
 
     if (es) {
@@ -430,8 +399,6 @@
       let data = e.data;
       try { data = JSON.parse(data); } catch (_) {}
 
-      // НОВОЕ: команды управления вкладками обрабатываем сразу,
-      // не дожидаясь готовности injected.js и не передавая в него
       if (data && typeof data === "object" && (
           data.type === "openTab" ||
           data.type === "closeTab" ||
@@ -450,4 +417,3 @@
 
   console.info(`${TAG} listener installed, tabId=${TAB_ID}`);
 })();
-

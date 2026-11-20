@@ -45,7 +45,7 @@ public final class TabRegistry {
                     old.active = false;
                     old.queue.offer("__close__");
                     clients.remove(old);
-                    System.out.println();
+                    ConsoleWriter.get().ensureNewline();
                     System.out.println("[TAB] replacing stale SSE: " + BridgeUtils.shortId(fresh.tabId));
                     System.out.print("> "); System.out.flush();
                 }
@@ -159,7 +159,7 @@ public final class TabRegistry {
         BrowserTab c = findClient(tabId);
         if (c == null) return;
         c.info = info;
-        System.out.println();
+        ConsoleWriter.get().ensureNewline();
         System.out.println("[TAB] registered: " + tabId);
         if (info != null && !info.isEmpty()) {
             System.out.println("      " + info);
@@ -181,7 +181,7 @@ public final class TabRegistry {
             c.smartSearch = smartSearch;
             if (changed) {
                 c.modesReported = true;
-                System.out.println();
+                ConsoleWriter.get().ensureNewline();
                 System.out.println("[MODE " + BridgeUtils.shortId(tabId) + "]"
                         + " thinking=" + thinking
                         + " smartSearch=" + smartSearch);
@@ -202,7 +202,7 @@ public final class TabRegistry {
     // ------------------------------------------------------------
     public static synchronized void printTabs() {
         List<BrowserTab> active = snapshotActive();
-        System.out.println();
+        ConsoleWriter.get().ensureNewline();
         System.out.println("[TABS] active: " + active.size()
                 + (selectedTabId != null ? " (selected: " + selectedTabId + ")" : " (selected: auto)"));
         for (int i = 0; i < active.size(); i++) {
@@ -222,7 +222,7 @@ public final class TabRegistry {
 
     public static synchronized void printState() {
         BrowserTab c = pickActiveForDispatch();
-        System.out.println();
+        ConsoleWriter.get().ensureNewline();
         if (c == null) {
             System.out.println("[STATE] no active tab");
         } else {

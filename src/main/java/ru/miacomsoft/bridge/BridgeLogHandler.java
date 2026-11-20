@@ -46,7 +46,7 @@ public final class BridgeLogHandler {
                 case "bye":           CommandDispatcher.onBye(tabId, text); break;
                 case "tab-op":        printTabOp(text); break;
                 case "console-error":
-                    System.out.println();
+                    ConsoleWriter.get().ensureNewline();
                     System.out.println("[EXT-ERR] " + text);
                     System.out.print("> "); System.out.flush();
                     break;
@@ -63,7 +63,7 @@ public final class BridgeLogHandler {
     }
 
     private static void printTabOp(String text) {
-        System.out.println();
+        ConsoleWriter.get().ensureNewline();
         System.out.println("[TABOP] " + (text == null ? "" : text));
         System.out.print("> "); System.out.flush();
     }

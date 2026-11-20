@@ -11,7 +11,6 @@ import java.util.concurrent.CompletableFuture;
 
 /**
  * Публичный API моста — статические фасады для Main.java и ollama.*.
- * (бывшие публичные методы BridgeService)
  */
 public final class BridgeCommands {
 
@@ -65,15 +64,16 @@ public final class BridgeCommands {
     }
 
     public static void sendFileFromStdin(String path, String text) {
+        ConsoleWriter cw = ConsoleWriter.get();
         File f = new File(path);
         if (!f.isFile()) {
-            System.out.println();
+            cw.ensureNewline();
             System.out.println("[!] file not found: " + path);
             System.out.print("> "); System.out.flush();
             return;
         }
         if (f.length() > BridgeConstants.MAX_FILE_BYTES) {
-            System.out.println();
+            cw.ensureNewline();
             System.out.println("[!] file too large: " + f.length()
                     + " bytes (max " + BridgeConstants.MAX_FILE_BYTES + ")");
             System.out.print("> "); System.out.flush();
@@ -96,7 +96,7 @@ public final class BridgeCommands {
             arr.put(o);
             cmd.put("files", arr);
 
-            System.out.println();
+            cw.ensureNewline();
             System.out.println("[FILE] " + f.getName()
                     + " (" + bytes.length + " bytes, " + mime + ")"
                     + (text != null && !text.isEmpty() ? " → " + text : ""));
@@ -104,7 +104,7 @@ public final class BridgeCommands {
 
             CommandDispatcher.enqueue(new PendingCommand(cmd.toString(), null, true, true));
         } catch (Exception e) {
-            System.out.println();
+            cw.ensureNewline();
             System.out.println("[!] file read error: " + e.getMessage());
             System.out.print("> "); System.out.flush();
         }
@@ -144,7 +144,7 @@ public final class BridgeCommands {
                         listener.onError("file too large: " + a.name
                                 + " (" + bin + " > " + BridgeConstants.MAX_FILE_BYTES + ")");
                     } else {
-                        System.out.println();
+                        ConsoleWriter.get().ensureNewline();
                         System.out.println("[!] file too large: " + a.name);
                         System.out.print("> "); System.out.flush();
                     }
@@ -157,7 +157,7 @@ public final class BridgeCommands {
                 if (listener != null) {
                     listener.onError("attachments total size exceeds " + BridgeConstants.MAX_TOTAL_BYTES);
                 } else {
-                    System.out.println();
+                    ConsoleWriter.get().ensureNewline();
                     System.out.println("[!] attachments total too large");
                     System.out.print("> "); System.out.flush();
                 }
@@ -198,7 +198,7 @@ public final class BridgeCommands {
 
     public static void closeTabFromStdin(String targetTabId) {
         if (targetTabId == null || targetTabId.isEmpty()) {
-            System.out.println();
+            ConsoleWriter.get().ensureNewline();
             System.out.println("[!] closeTab: empty targetTabId");
             System.out.print("> "); System.out.flush();
             return;
@@ -218,7 +218,7 @@ public final class BridgeCommands {
     static void sendFireAndForget(String json, String fallbackUrlForLaunch) {
         BrowserTab c = TabRegistry.pickAnyActive();
         if (c == null) {
-            System.out.println();
+            ConsoleWriter.get().ensureNewline();
             if (fallbackUrlForLaunch != null) {
                 System.out.println("[!] no active tab; launching Chrome directly: " + fallbackUrlForLaunch);
                 System.out.print("> "); System.out.flush();

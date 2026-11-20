@@ -76,10 +76,13 @@ public final class CommandDispatcher {
     }
 
     // ============================================================
-    //  /log: stream chunks
+    //  /log: stream chunks — вывод через ConsoleWriter
     // ============================================================
     public static void onStreamChunk(String sid, String text, String sType) {
         if (sid.isEmpty()) return;
+
+        ConsoleWriter cw = ConsoleWriter.get();
+
         synchronized (streamLock) {
             if (rejectedStreams.contains(sid)) return;
 
@@ -92,12 +95,11 @@ public final class CommandDispatcher {
             }
 
             if (!sType.equals(activeStreamType)) {
-                if (activeStreamType != null) System.out.println();
-                System.out.print("THINK".equals(sType) ? "[THINK] " : "[DEEPSEEK] ");
+                if (activeStreamType != null) cw.finishStream();
+                cw.printTag("THINK".equals(sType) ? "[THINK] " : "[DEEPSEEK] ");
                 activeStreamType = sType;
             }
-            System.out.print(text);
-            System.out.flush();
+            cw.appendStreamText(text);
         }
 
         StreamListener l = activeListener;
@@ -117,7 +119,9 @@ public final class CommandDispatcher {
             boolean orphan = (activeStreamId == null && awaitingResponse);
 
             if (wasActive || orphan) {
-                if (wasActive && activeStreamType != null) System.out.println();
+                if (wasActive && activeStreamType != null) {
+                    ConsoleWriter.get().finishStream();
+                }
                 activeStreamId = null;
                 activeStreamType = null;
                 activeServingTabId = null;
@@ -137,7 +141,8 @@ public final class CommandDispatcher {
         trySendNext();
 
         if (wasStdin) {
-            System.out.print("> "); System.out.flush();
+            System.out.print("> ");
+            System.out.flush();
         }
     }
 
@@ -155,12 +160,14 @@ public final class CommandDispatcher {
         activeIsChatCommand = false;
         activeServingTabId = null;
 
+        ConsoleWriter.get().ensureNewline();
+
         if (l != null) {
             try { l.onError(text); } catch (Exception ignored) {}
         } else if (wasStdin) {
-            System.out.println();
             System.out.println("✓ " + text);
-            System.out.print("> "); System.out.flush();
+            System.out.print("> ");
+            System.out.flush();
         }
 
         trySendNext();
@@ -175,12 +182,14 @@ public final class CommandDispatcher {
         activeIsChatCommand = false;
         activeServingTabId = null;
 
+        ConsoleWriter.get().ensureNewline();
+
         if (l != null) {
             try { l.onError(text); } catch (Exception ignored) {}
         } else if (wasStdin) {
-            System.out.println();
             System.out.println("[!] " + text);
-            System.out.print("> "); System.out.flush();
+            System.out.print("> ");
+            System.out.flush();
         }
         trySendNext();
     }
@@ -217,16 +226,18 @@ public final class CommandDispatcher {
             if (l != null) {
                 try { l.onError("tab closed: " + BridgeUtils.shortId(tabId)); } catch (Exception ignored) {}
             } else if (wasStdin) {
-                System.out.println();
+                ConsoleWriter.get().ensureNewline();
                 System.out.println("[!] tab closed: " + BridgeUtils.shortId(tabId));
-                System.out.print("> "); System.out.flush();
+                System.out.print("> ");
+                System.out.flush();
             }
         }
 
-        System.out.println();
+        ConsoleWriter.get().ensureNewline();
         System.out.println("[BYE] tab " + BridgeUtils.shortId(tabId)
                 + " closed" + (reason != null && !reason.isEmpty() ? " (" + reason + ")" : ""));
-        System.out.print("> "); System.out.flush();
+        System.out.print("> ");
+        System.out.flush();
 
         trySendNext();
     }
@@ -256,10 +267,11 @@ public final class CommandDispatcher {
         }
 
         if (wasFirstTime) {
-            System.out.println();
+            ConsoleWriter.get().ensureNewline();
             System.out.println("[LIMIT] tab " + BridgeUtils.shortId(tabId)
                     + " hit usage limit. Reset: " + (resetOn.isEmpty() ? "?" : resetOn));
-            System.out.print("> "); System.out.flush();
+            System.out.print("> ");
+            System.out.flush();
         }
 
         if (wasServing) {
@@ -267,9 +279,10 @@ public final class CommandDispatcher {
             if (l != null) {
                 try { l.onError("usage limit reached: " + resetOn); } catch (Exception ignored) {}
             } else if (wasStdin) {
-                System.out.println();
+                ConsoleWriter.get().ensureNewline();
                 System.out.println("[!] usage limit reached: " + resetOn);
-                System.out.print("> "); System.out.flush();
+                System.out.print("> ");
+                System.out.flush();
             }
             trySendNext();
         }
@@ -281,7 +294,6 @@ public final class CommandDispatcher {
     public static synchronized void clearServingTabIf(String tabId) {
         if (tabId != null && tabId.equals(activeServingTabId)) {
             activeServingTabId = null;
-            // awaitingResponse НЕ сбрасываем — пусть watchdog обработает
         }
     }
 }

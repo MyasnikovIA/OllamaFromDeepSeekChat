@@ -11,8 +11,10 @@
   const EVT_RESULT   = "__ds_eval_result__";
   const EVT_READY    = "__ds_injected_ready__";
 
-  // ВАЖНО: здесь больше нет SERVER_URL, tabId, postLog, connectSSE,
-  // beforeunload-beacon. Всё общение с сервером — через content.js.
+  // ВАЖНО: этот скрипт больше не подключается к серверу.
+  // - Потоковые чанки: CHANNEL → content.js → POST /log
+  // - Консольные сообщения: EVT_CONSOLE → content.js → POST /log
+  // - Команды сервера: SSE в content.js → EVT_EXEC → этот скрипт
 
   let __streamSeq = 0;
   const nextStreamId = () =>
@@ -209,7 +211,6 @@
     return new Blob([bytes], { type: mime || "application/octet-stream" });
   }
 
-  // ---------- определение текстовых файлов и декодирование ----------
   const TEXT_EXT_RE = /\.(txt|text|md|markdown|json|jsonl|csv|tsv|html?|xml|ya?ml|log|ini|conf|cfg|toml|properties|js|jsx|ts|tsx|py|java|kt|c|cc|cpp|cxx|h|hpp|cs|go|rs|rb|php|pl|lua|swift|m|mm|scala|clj|ex|exs|erl|hs|r|sql|sh|bash|zsh|bat|cmd|ps1|tex|rtf|env)$/i;
   const TEXT_MIME_RE = /^(text\/|application\/(json|xml|x-yaml|yaml|javascript|typescript|sql|x-sh|x-shellscript|x-httpd-php))/i;
 
@@ -229,7 +230,6 @@
     return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
   }
 
-  // ---------- загрузка бинарных файлов ----------
   async function uploadFilesToInput(files) {
     if (!files || files.length === 0) return true;
 
@@ -359,7 +359,6 @@
     return sawProgress;
   }
 
-  // ---------- Continue watcher ----------
   const CONTINUE_TEXT = /^Continue$/i;
   let continueClickTimer = null;
   let lastContinueClickAt = 0;
@@ -415,7 +414,6 @@
     setInterval(scheduleContinueCheck, 2000);
   }
 
-  // ---------- sendToDeepSeek ----------
   async function sendToDeepSeek(text, files) {
     let finalText = (text || "").trim();
     const binaryFiles = [];
@@ -550,7 +548,6 @@
     return true;
   }
 
-  // ---------- новый чат ----------
   async function newChat() {
     let plusBtn = null;
     const plusStart = Date.now();
@@ -607,7 +604,6 @@
     return true;
   }
 
-  // ---------- переключатель «Глубокое мышление» ----------
   function findThinkingToggle() {
     for (const el of document.querySelectorAll("[aria-pressed]")) {
       const text = (el.textContent || "").trim();
@@ -654,7 +650,6 @@
     return true;
   }
 
-  // ---------- переключатель «Умный поиск» ----------
   function findSmartSearchToggle() {
     for (const el of document.querySelectorAll("[aria-pressed]")) {
       const spans = el.querySelectorAll("span");
@@ -718,7 +713,6 @@
     return true;
   }
 
-  // ---------- публичный API ----------
   window.sendToDeepSeek      = sendToDeepSeek;
   window.newChat             = newChat;
   window.enableThinking      = enableThinking;
@@ -728,7 +722,6 @@
 
   setupContinueWatcher();
 
-  // ---------- приём команд из content.js ----------
   window.addEventListener(EVT_EXEC, (evt) => {
     const data = evt.detail;
     try {
