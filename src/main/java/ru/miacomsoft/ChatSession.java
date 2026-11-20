@@ -3,15 +3,19 @@ package ru.miacomsoft;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 public class ChatSession {
     private final List<JSONObject> messageHistory = new ArrayList<>();
+    private final Set<String> sentContexts = new HashSet<>();
     private final String systemPrompt = "You are a helpful assistant.";
 
     public synchronized void clearHistory() {
         messageHistory.clear();
-        System.out.println("[SESSION] История сообщений очищена.");
+        sentContexts.clear(); // Очищаем кэш контекстов при новом чате
+        System.out.println("[SESSION] История сообщений и кэш контекста очищены.");
     }
 
     public synchronized void addMessage(String role, String content) {
@@ -23,6 +27,15 @@ public class ChatSession {
 
     public synchronized int getHistorySize() {
         return messageHistory.size();
+    }
+
+    // --- НОВОЕ: Проверка и маркировка контекста ---
+    public synchronized boolean isContextSent(String contextText) {
+        return sentContexts.contains(contextText.trim());
+    }
+
+    public synchronized void markContextSent(String contextText) {
+        sentContexts.add(contextText.trim());
     }
 
     // Проверяем, является ли запрос началом нового диалога
@@ -37,7 +50,6 @@ public class ChatSession {
             }
         }
 
-        // Если пришло только 1 сообщение от пользователя (текущее), а до этого была история — это новый чат
         if (userMsgCount <= 1 && getHistorySize() > 0) {
             clearHistory();
             return true;
