@@ -192,6 +192,88 @@
     return null;
   }
 
+  // ---------- авто-продолжение ответа (Continue) ----------
+  const CONTINUE_TEXT = /^Continue$/i;
+  let continueClickTimer = null;
+  let lastContinueClickAt = 0;
+  let lastContinueEl = null;
+
+  function findContinueButton() {
+    const spans = document.querySelectorAll("span.ds-button__content");
+    for (const span of spans) {
+      const text = (span.textContent || "").trim();
+      if (!CONTINUE_TEXT.test(text)) continue;
+
+      const btn =
+          span.closest('[role="button"]') ||
+          span.closest("button") ||
+          span.closest(".ds-button") ||
+          span.parentElement;
+
+      if (!btn) continue;
+      if (btn.disabled) continue;
+      if (btn.getAttribute("aria-disabled") === "true") continue;
+
+      const rect = btn.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) continue;
+
+      return btn;
+    }
+    return null;
+  }
+
+  function clickContinueIfPresent() {
+    const btn = findContinueButton();
+    if (!btn) return false;
+
+    const now = Date.now();
+    if (btn === lastContinueEl && now - lastContinueClickAt < 700) {
+      return false;
+    }
+
+    lastContinueEl = btn;
+    lastContinueClickAt = now;
+
+    try {
+      clickWithMouse(btn);
+    } catch (_) {}
+
+    return true;
+  }
+
+  function scheduleContinueCheck() {
+    if (continueClickTimer) return;
+    continueClickTimer = setTimeout(() => {
+      continueClickTimer = null;
+      clickContinueIfPresent();
+    }, 50);
+  }
+
+  function setupContinueWatcher() {
+    scheduleContinueCheck();
+
+    const root = document.documentElement || document;
+    if (!root) return;
+
+    try {
+      const observer = new MutationObserver(() => {
+        scheduleContinueCheck();
+      });
+      observer.observe(root, {
+        childList: true,
+        subtree: true,
+        characterData: true
+      });
+    } catch (_) {}
+
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", scheduleContinueCheck, { once: true });
+    }
+
+    // страховка на случай пропущенных мутаций
+    setInterval(scheduleContinueCheck, 2000);
+  }
+
   // ---------- sendToDeepSeek ----------
   async function sendToDeepSeek(text) {
     // Ждем загрузки поля ввода
@@ -476,6 +558,9 @@
   window.disableThinking     = disableThinking;
   window.enableSmartSearch   = enableSmartSearch;
   window.disableSmartSearch  = disableSmartSearch;
+
+  // ---------- запуск авто-продолжения ----------
+  setupContinueWatcher();
 
   // ---------- приём команд из content.js ----------
   window.addEventListener(EVT_EXEC, (evt) => {
