@@ -19,6 +19,8 @@ import java.util.concurrent.TimeUnit;
  *   "/new"            → создать новый чат
  *   "/think on"       → включить режим размышления
  *   "/think off"      → выключить режим размышления
+ *   "/search on"      → включить умный поиск
+ *   "/search off"     → выключить умный поиск
  *   "/help"           → подсказка
  */
 public class Main {
@@ -88,6 +90,8 @@ public class Main {
         System.out.println("  /new             → создать новый чат");
         System.out.println("  /think on        → включить режим размышления");
         System.out.println("  /think off       → выключить режим размышления");
+        System.out.println("  /search on       → включить умный поиск");
+        System.out.println("  /search off      → выключить умный поиск");
         System.out.println("  /help            → эта подсказка");
         System.out.println("========================================================");
         System.out.print("> ");
@@ -114,6 +118,17 @@ public class Main {
 
         if (trimmed.equals("/think off")) {
             BridgeService.sendDisableThinkingFromStdin();
+            return;
+        }
+
+        // НОВОЕ: умный поиск
+        if (trimmed.equals("/search on") || trimmed.equals("/search")) {
+            BridgeService.sendEnableSmartSearchFromStdin();
+            return;
+        }
+
+        if (trimmed.equals("/search off")) {
+            BridgeService.sendDisableSmartSearchFromStdin();
             return;
         }
 

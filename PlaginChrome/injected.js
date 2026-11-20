@@ -394,11 +394,88 @@
     return true;
   }
 
+  // ---------- НОВОЕ: поиск переключателя «Умный поиск» ----------
+  function findSmartSearchToggle() {
+    // 1) основной признак — текст span'а внутри [aria-pressed]
+    for (const el of document.querySelectorAll("[aria-pressed]")) {
+      const spans = el.querySelectorAll("span");
+      for (const s of spans) {
+        const t = (s.textContent || "").trim();
+        if (/^(Search|Умный поиск)$/i.test(t)) return el;
+      }
+      const title = el.getAttribute("title") || el.getAttribute("aria-label") || "";
+      if (/^(Search|Умный поиск)$/i.test(title)) return el;
+    }
+    // 2) fallback — по характерному SVG-path ручки лупы
+    for (const el of document.querySelectorAll("[aria-pressed]")) {
+      let hasSearchHandle = false;
+      let isThinking = false;
+      for (const p of el.querySelectorAll("svg path")) {
+        const d = p.getAttribute("d") || "";
+        if (d.includes("M1.6399999856948853,8 C1.6399999856948853,8 14.359999656677246,8 14.359999656677246,8")) {
+          hasSearchHandle = true;
+        }
+        if (d.startsWith("M8.00192 6.64454")) {
+          isThinking = true;
+        }
+      }
+      if (hasSearchHandle && !isThinking) return el;
+    }
+    return null;
+  }
+
+  // ---------- НОВОЕ: ожидание переключателя «Умный поиск» ----------
+  async function waitForSmartSearchToggle(timeout = 5000) {
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+      const t = findSmartSearchToggle();
+      if (t) return t;
+      await sleep(100);
+    }
+    return null;
+  }
+
+  // ---------- НОВОЕ: включить умный поиск ----------
+  async function enableSmartSearch() {
+    const toggle = await waitForSmartSearchToggle();
+    if (!toggle) throw new Error("[DS] Переключатель 'Умный поиск' не найден");
+
+    const pressed = toggle.getAttribute("aria-pressed") === "true";
+    if (pressed) return true;
+
+    clickWithMouse(toggle);
+    await sleep(500);
+
+    if (toggle.getAttribute("aria-pressed") !== "true") {
+      throw new Error("[DS] Не удалось включить умный поиск");
+    }
+    return true;
+  }
+
+  // ---------- НОВОЕ: выключить умный поиск ----------
+  async function disableSmartSearch() {
+    const toggle = await waitForSmartSearchToggle();
+    if (!toggle) throw new Error("[DS] Переключатель 'Умный поиск' не найден");
+
+    const pressed = toggle.getAttribute("aria-pressed") === "true";
+    if (!pressed) return true;
+
+    clickWithMouse(toggle);
+    await sleep(500);
+
+    if (toggle.getAttribute("aria-pressed") === "true") {
+      throw new Error("[DS] Не удалось выключить умный поиск");
+    }
+    return true;
+  }
+
   // ---------- публичный API ----------
-  window.sendToDeepSeek  = sendToDeepSeek;
-  window.newChat         = newChat;
-  window.enableThinking  = enableThinking;
-  window.disableThinking = disableThinking;
+  window.sendToDeepSeek      = sendToDeepSeek;
+  window.newChat             = newChat;
+  window.enableThinking      = enableThinking;
+  window.disableThinking     = disableThinking;
+  window.enableSmartSearch   = enableSmartSearch;
+  window.disableSmartSearch  = disableSmartSearch;
 
   // ---------- приём команд из content.js ----------
   window.addEventListener(EVT_EXEC, (evt) => {
@@ -432,6 +509,18 @@
           window.disableThinking()
               .then(() => emitResult(true, "Режим размышления выключен"))
               .catch((e) => emitResult(false, "disableThinking failed: " + (e && e.message || e)));
+          return;
+
+        case "enableSmartSearch":
+          window.enableSmartSearch()
+              .then(() => emitResult(true, "Умный поиск включён"))
+              .catch((e) => emitResult(false, "enableSmartSearch failed: " + (e && e.message || e)));
+          return;
+
+        case "disableSmartSearch":
+          window.disableSmartSearch()
+              .then(() => emitResult(true, "Умный поиск выключен"))
+              .catch((e) => emitResult(false, "disableSmartSearch failed: " + (e && e.message || e)));
           return;
 
         case "eval": {
@@ -469,5 +558,5 @@
   try { window.dispatchEvent(new CustomEvent(EVT_READY)); } catch (_) {}
 
   console.info("[DS-INTERCEPT] fetch/XHR patched →", TARGET_PATH);
-  console.info("[DS-INTERCEPT] window.{sendToDeepSeek,newChat,enableThinking,disableThinking} attached");
+  console.info("[DS-INTERCEPT] window.{sendToDeepSeek,newChat,enableThinking,disableThinking,enableSmartSearch,disableSmartSearch} attached");
 })();

@@ -30,6 +30,8 @@ import java.util.concurrent.TimeUnit;
  *   - sendNewChatFromStdin()            — новый чат
  *   - sendEnableThinkingFromStdin()     — включить режим размышления
  *   - sendDisableThinkingFromStdin()    — выключить режим размышления
+ *   - sendEnableSmartSearchFromStdin()  — включить умный поиск
+ *   - sendDisableSmartSearchFromStdin() — выключить умный поиск
  *   - sendChat(text)                    — CompletableFuture<String>
  *   - sendChatStream(text, listener)    — стрим в слушатель
  */
@@ -44,7 +46,7 @@ public class BridgeService {
     static volatile String activeStreamType = null;
     static volatile StreamListener activeListener = null;
     static volatile boolean activeFromStdin = false;
-    static volatile boolean activeIsChatCommand = false;   // «пользовательская» команда (send / newChat / thinking)
+    static volatile boolean activeIsChatCommand = false;   // «пользовательская» команда (send / newChat / thinking / smartSearch)
     static volatile boolean awaitingResponse = false;
     static volatile long lastActivityAt = System.currentTimeMillis();
 
@@ -109,6 +111,20 @@ public class BridgeService {
     public static void sendDisableThinkingFromStdin() {
         JSONObject cmd = new JSONObject();
         cmd.put("type", "disableThinking");
+        enqueue(new PendingCommand(cmd.toString(), null, true, true));
+    }
+
+    // НОВОЕ: включение умного поиска
+    public static void sendEnableSmartSearchFromStdin() {
+        JSONObject cmd = new JSONObject();
+        cmd.put("type", "enableSmartSearch");
+        enqueue(new PendingCommand(cmd.toString(), null, true, true));
+    }
+
+    // НОВОЕ: выключение умного поиска
+    public static void sendDisableSmartSearchFromStdin() {
+        JSONObject cmd = new JSONObject();
+        cmd.put("type", "disableSmartSearch");
         enqueue(new PendingCommand(cmd.toString(), null, true, true));
     }
 
