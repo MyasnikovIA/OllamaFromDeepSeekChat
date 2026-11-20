@@ -63,6 +63,34 @@ public final class BridgeCommands {
         CommandDispatcher.enqueue(new PendingCommand(cmd.toString(), null, true, true));
     }
 
+    // ============================================================
+    //  НОВОЕ: стоп / продолжить
+    //
+    //  Эти команды идут через sendFireAndForget — они не должны
+    //  блокироваться текущим awaitingResponse, иначе ими нельзя
+    //  было бы прервать уже идущую генерацию.
+    //
+    //  Завершение остановленного стрима приходит как обычный
+    //  stream-done (DeepSeek закрывает fetch по клику на «Стоп»),
+    //  что штатно снимает awaitingResponse. Watchdog остаётся
+    //  fallback'ом на случай, если по какой-то причине stream-done
+    //  не пришёл (120 сек).
+    // ============================================================
+    public static void sendStopFromStdin() {
+        JSONObject cmd = new JSONObject();
+        cmd.put("type", "stopGeneration");
+        sendFireAndForget(cmd.toString(), null);
+    }
+
+    public static void sendResumeFromStdin() {
+        JSONObject cmd = new JSONObject();
+        cmd.put("type", "resumeGeneration");
+        sendFireAndForget(cmd.toString(), null);
+    }
+
+    // ============================================================
+    //  sendFileFromStdin
+    // ============================================================
     public static void sendFileFromStdin(String path, String text) {
         ConsoleWriter cw = ConsoleWriter.get();
         File f = new File(path);

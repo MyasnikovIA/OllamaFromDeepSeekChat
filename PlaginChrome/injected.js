@@ -11,10 +11,19 @@
   const EVT_RESULT   = "__ds_eval_result__";
   const EVT_READY    = "__ds_injected_ready__";
 
-  // ВАЖНО: этот скрипт больше не подключается к серверу.
-  // - Потоковые чанки: CHANNEL → content.js → POST /log
-  // - Консольные сообщения: EVT_CONSOLE → content.js → POST /log
-  // - Команды сервера: SSE в content.js → EVT_EXEC → этот скрипт
+  // ---------- стоп/продолжение ----------
+  // SVG-path стоп-кнопки DeepSeek (кнопка «Стоп» во время генерации)
+  const STOP_PATH_MARKER = "M2 4.88C2 3.68009";
+  // Текст кнопки «Продолжить» (после остановки)
+  const CONTINUE_TEXT = /^(Continue|Продолжить|Продолжить генерацию)$/i;
+
+  /**
+   * Флаг «пользователь запросил остановку».
+   * true  → авто-продолжение по Continue-кнопке выключено,
+   *         пока пользователь не сделает /resume или не отправит новый send.
+   * false → авто-продолжение работает штатно.
+   */
+  let stopRequested = false;
 
   let __streamSeq = 0;
   const nextStreamId = () =>
@@ -359,7 +368,9 @@
     return sawProgress;
   }
 
-  const CONTINUE_TEXT = /^Continue$/i;
+  // ============================================================
+  //  Continue watcher (модифицирован: уважает stopRequested)
+  // ============================================================
   let continueClickTimer = null;
   let lastContinueClickAt = 0;
   let lastContinueEl = null;
@@ -382,6 +393,10 @@
   }
 
   function clickContinueIfPresent() {
+    // НОВОЕ: после явной остановки пользователем авто-продолжение отключено,
+    // пока не придёт /resume или новый /send.
+    if (stopRequested) return false;
+
     const btn = findContinueButton();
     if (!btn) return false;
     const now = Date.now();
@@ -414,7 +429,66 @@
     setInterval(scheduleContinueCheck, 2000);
   }
 
+  // ============================================================
+  //  СТОП / ПРОДОЛЖИТЬ
+  // ============================================================
+  function findStopButton() {
+    for (const p of document.querySelectorAll("svg path")) {
+      const d = p.getAttribute("d") || "";
+      if (d.includes(STOP_PATH_MARKER)) {
+        return p.closest('[role="button"]') || p.closest("button") || p.parentElement;
+      }
+    }
+    return null;
+  }
+
+  async function stopGeneration() {
+    const btn = findStopButton();
+    if (!btn) {
+      throw new Error("[DS] Кнопка 'Стоп' не найдена (генерация уже остановлена?)");
+    }
+    // Ставим флаг ДО клика — чтобы watcher не успел авто-продолжить.
+    stopRequested = true;
+    clickWithMouse(btn);
+    console.log("[DS] ✔ Генерация остановлена пользователем");
+    return true;
+  }
+
+  async function resumeGeneration() {
+    // Снимаем флаг ДО клика — иначе watcher проигнорирует кнопку.
+    stopRequested = false;
+    const btn = findContinueButton();
+    if (!btn) {
+      // Возможно, генерация ещё не встала на паузу — ждём до 3 секунд.
+      const start = Date.now();
+      while (Date.now() - start < 3000) {
+        await sleep(100);
+        const b = findContinueButton();
+        if (b) {
+          lastContinueEl = b;
+          lastContinueClickAt = Date.now();
+          clickWithMouse(b);
+          console.log("[DS] ✔ Генерация продолжена (после ожидания)");
+          return true;
+        }
+      }
+      throw new Error("[DS] Кнопка 'Продолжить' не найдена");
+    }
+    lastContinueEl = btn;
+    lastContinueClickAt = Date.now();
+    clickWithMouse(btn);
+    console.log("[DS] ✔ Генерация продолжена");
+    return true;
+  }
+
+  // ============================================================
+  //  sendToDeepSeek
+  // ============================================================
   async function sendToDeepSeek(text, files) {
+    // Новый запрос — сбрасываем флаг остановки,
+    // чтобы будущее авто-продолжение снова работало.
+    stopRequested = false;
+
     let finalText = (text || "").trim();
     const binaryFiles = [];
     const inlinedNames = [];
@@ -548,6 +622,9 @@
     return true;
   }
 
+  // ============================================================
+  //  newChat / thinking / smart-search (без изменений)
+  // ============================================================
   async function newChat() {
     let plusBtn = null;
     const plusStart = Date.now();
@@ -713,15 +790,19 @@
     return true;
   }
 
+  // ---------- публичный API ----------
   window.sendToDeepSeek      = sendToDeepSeek;
   window.newChat             = newChat;
   window.enableThinking      = enableThinking;
   window.disableThinking     = disableThinking;
   window.enableSmartSearch   = enableSmartSearch;
   window.disableSmartSearch  = disableSmartSearch;
+  window.stopGeneration      = stopGeneration;    // НОВОЕ
+  window.resumeGeneration    = resumeGeneration;  // НОВОЕ
 
   setupContinueWatcher();
 
+  // ---------- приём команд из content.js ----------
   window.addEventListener(EVT_EXEC, (evt) => {
     const data = evt.detail;
     try {
@@ -732,6 +813,7 @@
 
       switch (data.type) {
         case "send":
+          // сброс флага stopRequested делается внутри sendToDeepSeek
           window.sendToDeepSeek(data.text, data.files)
               .then(() => emitResult(true, "sent: " + (data.text || "")))
               .catch((e) => emitResult(false, "send failed: " + (e && e.message || e)));
@@ -765,6 +847,19 @@
           window.disableSmartSearch()
               .then(() => emitResult(true, "Умный поиск выключен"))
               .catch((e) => emitResult(false, "disableSmartSearch failed: " + (e && e.message || e)));
+          return;
+
+        // ---------- НОВОЕ: стоп / продолжить ----------
+        case "stopGeneration":
+          window.stopGeneration()
+              .then(() => emitResult(true, "Генерация остановлена"))
+              .catch((e) => emitResult(false, "stopGeneration failed: " + (e && e.message || e)));
+          return;
+
+        case "resumeGeneration":
+          window.resumeGeneration()
+              .then(() => emitResult(true, "Генерация продолжена"))
+              .catch((e) => emitResult(false, "resumeGeneration failed: " + (e && e.message || e)));
           return;
 
         case "eval": {
@@ -802,5 +897,5 @@
   try { window.dispatchEvent(new CustomEvent(EVT_READY)); } catch (_) {}
 
   console.info("[DS-INTERCEPT] fetch/XHR patched →", TARGET_PATH);
-  console.info("[DS-INTERCEPT] window.{sendToDeepSeek,newChat,enableThinking,disableThinking,enableSmartSearch,disableSmartSearch} attached");
+  console.info("[DS-INTERCEPT] window.{sendToDeepSeek,newChat,enableThinking,disableThinking,enableSmartSearch,disableSmartSearch,stopGeneration,resumeGeneration} attached");
 })();

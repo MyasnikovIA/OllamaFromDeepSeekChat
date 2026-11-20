@@ -31,6 +31,8 @@ import java.util.concurrent.TimeUnit;
  *   "/think off"      → выключить режим размышления
  *   "/search on"      → включить умный поиск
  *   "/search off"     → выключить умный поиск
+ *   "/stop"           → остановить текущую генерацию
+ *   "/resume"         → продолжить остановленную генерацию
  *   "/file <path> [text]"  → отправить файл (можно с текстом)
  *   "/tabs"           → список открытых вкладок DeepSeek
  *   "/tab <n|id>"     → выбрать вкладку по номеру или tabId (можно префикс)
@@ -44,8 +46,6 @@ import java.util.concurrent.TimeUnit;
 public class Main {
 
     public static final int PORT = 11434;
-
-    // Поле session удалено: единственный владелец — SessionManager.
 
     public static void main(String[] args) throws Exception {
         boolean noBrowser = false;
@@ -115,6 +115,8 @@ public class Main {
         System.out.println("  /think off           → выключить режим размышления");
         System.out.println("  /search on           → включить умный поиск");
         System.out.println("  /search off          → выключить умный поиск");
+        System.out.println("  /stop                → остановить текущую генерацию");
+        System.out.println("  /resume              → продолжить остановленную генерацию");
         System.out.println("  /file <path> [text]  → отправить файл в DeepSeek (с текстом)");
         System.out.println("  /tabs                → список открытых вкладок DeepSeek");
         System.out.println("  /tab <n|id>          → выбрать вкладку (#n или tabId/префикс)");
@@ -160,6 +162,17 @@ public class Main {
 
         if (trimmed.equals("/search off")) {
             BridgeCommands.sendDisableSmartSearchFromStdin();
+            return;
+        }
+
+        // ---------- НОВОЕ: стоп / продолжить ----------
+        if (trimmed.equals("/stop")) {
+            BridgeCommands.sendStopFromStdin();
+            return;
+        }
+
+        if (trimmed.equals("/resume") || trimmed.equals("/continue")) {
+            BridgeCommands.sendResumeFromStdin();
             return;
         }
 

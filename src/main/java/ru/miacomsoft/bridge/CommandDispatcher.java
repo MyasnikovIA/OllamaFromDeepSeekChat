@@ -148,12 +148,14 @@ public final class CommandDispatcher {
 
     // ============================================================
     //  /log: result / error
+    //
+    //  НОВОЕ: если нет активного listener'а — печатаем всегда
+    //  (это результат ручных команд: stop/resume/eval/...).
     // ============================================================
     public static void onResult(String text) {
         if (text.startsWith("sent:")) return;
 
         StreamListener l = activeListener;
-        boolean wasStdin = activeFromStdin;
         activeListener = null;
         awaitingResponse = false;
         activeFromStdin = false;
@@ -164,7 +166,7 @@ public final class CommandDispatcher {
 
         if (l != null) {
             try { l.onError(text); } catch (Exception ignored) {}
-        } else if (wasStdin) {
+        } else {
             System.out.println("✓ " + text);
             System.out.print("> ");
             System.out.flush();
@@ -175,7 +177,6 @@ public final class CommandDispatcher {
 
     public static void onError(String text) {
         StreamListener l = activeListener;
-        boolean wasStdin = activeFromStdin;
         activeListener = null;
         awaitingResponse = false;
         activeFromStdin = false;
@@ -186,7 +187,7 @@ public final class CommandDispatcher {
 
         if (l != null) {
             try { l.onError(text); } catch (Exception ignored) {}
-        } else if (wasStdin) {
+        } else {
             System.out.println("[!] " + text);
             System.out.print("> ");
             System.out.flush();
