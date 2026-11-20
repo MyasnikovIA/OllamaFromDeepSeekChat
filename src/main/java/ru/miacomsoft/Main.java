@@ -1,6 +1,10 @@
 package ru.miacomsoft;
 
 import com.sun.net.httpserver.HttpServer;
+import ru.miacomsoft.bridge.BridgeCommands;
+import ru.miacomsoft.bridge.BridgeRouter;
+import ru.miacomsoft.ollama.OllamaRouter;
+import ru.miacomsoft.session.SessionManager;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -15,7 +19,7 @@ import java.util.concurrent.TimeUnit;
  *
  * Аргументы командной строки (args):
  *   --no-browser              не открывать Chrome
- *   --debug                   включить отладочный вывод JSON в OllamaApiService
+ *   --debug                   включить отладочный вывод JSON
  *   --extension=<путь>        путь к папке расширения Chrome
  *   --profile=<путь>          путь к профилю Chrome
  *
@@ -30,7 +34,7 @@ import java.util.concurrent.TimeUnit;
  *   "/file <path> [text]"  → отправить файл (можно с текстом)
  *   "/tabs"           → список открытых вкладок DeepSeek
  *   "/tab <n|id>"     → выбрать вкладку по номеру или tabId (можно префикс)
- *   "/opentab [url]"  → открыть новую вкладку DeepSeek (по умолчанию chat.deepseek.com)
+ *   "/opentab [url]"  → открыть новую вкладку DeepSeek
  *   "/newtab [url]"   → алиас для /opentab
  *   "/close <n|id>"   → закрыть вкладку по номеру или tabId (можно префикс)
  *   "/closeall"       → закрыть все вкладки chat.deepseek.com/*
@@ -41,7 +45,7 @@ public class Main {
 
     public static final int PORT = 11434;
 
-    public static final ChatSession session = new ChatSession();
+    // Поле session удалено: единственный владелец — SessionManager.
 
     public static void main(String[] args) throws Exception {
         boolean noBrowser = false;
@@ -56,19 +60,18 @@ public class Main {
                 System.setProperty("ds.profile.dir", arg.substring("--profile=".length()));
             }
         }
-        System.setProperty("ds.debug", "true");
 
         HttpServer server = HttpServer.create(new InetSocketAddress(PORT), 0);
         server.setExecutor(Executors.newCachedThreadPool());
 
-        BridgeService.register(server);
-        OllamaApiService.register(server);
+        BridgeRouter.register(server);
+        OllamaRouter.register(server);
         server.start();
 
         printBanner();
 
         ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
-        sched.scheduleAtFixedRate(BridgeService::watchdogTick, 10, 10, TimeUnit.SECONDS);
+        sched.scheduleAtFixedRate(BridgeCommands::watchdogTick, 10, 10, TimeUnit.SECONDS);
 
         if (!noBrowser && !"true".equals(System.getProperty("ds.no.browser"))) {
             ChromeLauncher.openDeepSeek();
@@ -135,38 +138,36 @@ public class Main {
         }
 
         if (trimmed.equals("/new") || trimmed.equals("/newchat")) {
-            session.clearHistory();
-            BridgeService.sendNewChatFromStdin();
+            SessionManager.clearHistory();
+            BridgeCommands.sendNewChatFromStdin();
             return;
         }
 
         if (trimmed.equals("/think on") || trimmed.equals("/think")) {
-            BridgeService.sendEnableThinkingFromStdin();
+            BridgeCommands.sendEnableThinkingFromStdin();
             return;
         }
 
         if (trimmed.equals("/think off")) {
-            BridgeService.sendDisableThinkingFromStdin();
+            BridgeCommands.sendDisableThinkingFromStdin();
             return;
         }
 
         if (trimmed.equals("/search on") || trimmed.equals("/search")) {
-            BridgeService.sendEnableSmartSearchFromStdin();
+            BridgeCommands.sendEnableSmartSearchFromStdin();
             return;
         }
 
         if (trimmed.equals("/search off")) {
-            BridgeService.sendDisableSmartSearchFromStdin();
+            BridgeCommands.sendDisableSmartSearchFromStdin();
             return;
         }
 
-        // ---------- /file <path> [text] ----------
         if (trimmed.startsWith("/file ")) {
             String rest = trimmed.substring("/file ".length()).trim();
             if (rest.isEmpty()) {
                 System.out.println("[FILE] usage: /file <path> [text]");
-                System.out.print("> ");
-                System.out.flush();
+                System.out.print("> "); System.out.flush();
                 return;
             }
             String path;
@@ -197,26 +198,23 @@ public class Main {
                 }
             }
 
-            session.addMessage("user", "Отправлен файл: " + path + (text.isEmpty() ? "" : " | Текст: " + text));
+            SessionManager.addMessage("user",
+                    "Отправлен файл: " + path + (text.isEmpty() ? "" : " | Текст: " + text));
 
-            BridgeService.sendFileFromStdin(path, text);
+            BridgeCommands.sendFileFromStdin(path, text);
             return;
         }
 
-        // ---------- вкладки ----------
         if (trimmed.equals("/tabs")) {
-            BridgeService.printTabs();
+            BridgeCommands.printTabs();
             return;
         }
 
         if (trimmed.equals("/state")) {
-            BridgeService.printState();
+            BridgeCommands.printState();
             return;
         }
 
-        // ========================================================
-        //  НОВОЕ: /opentab [url] и /newtab [url]
-        // ========================================================
         if (trimmed.equals("/opentab")
                 || trimmed.equals("/newtab")
                 || trimmed.startsWith("/opentab ")
@@ -224,80 +222,67 @@ public class Main {
             String arg = "";
             int sp = trimmed.indexOf(' ');
             if (sp >= 0) arg = trimmed.substring(sp + 1).trim();
-            BridgeService.openNewTabFromStdin(arg);
+            BridgeCommands.openNewTabFromStdin(arg);
             return;
         }
 
-        // ========================================================
-        //  НОВОЕ: /closeall
-        // ========================================================
         if (trimmed.equals("/closeall")) {
-            BridgeService.closeAllTabsFromStdin();
+            BridgeCommands.closeAllTabsFromStdin();
             return;
         }
 
-        // ========================================================
-        //  НОВОЕ: /close <n|id|prefix>
-        // ========================================================
         if (trimmed.startsWith("/close ")) {
             String arg = trimmed.substring("/close ".length()).trim();
             if (arg.isEmpty()) {
                 System.out.println("[TAB] usage: /close <n|id>");
-                System.out.print("> ");
-                System.out.flush();
+                System.out.print("> "); System.out.flush();
                 return;
             }
             String targetId = null;
             try {
                 int idx = Integer.parseInt(arg);
-                targetId = BridgeService.getTabIdByIndex(idx);
+                targetId = BridgeCommands.getTabIdByIndex(idx);
             } catch (NumberFormatException e) {
-                targetId = BridgeService.findActiveTabId(arg);
+                targetId = BridgeCommands.findActiveTabId(arg);
             }
             if (targetId == null) {
                 System.out.println("[TAB] not found: " + arg);
-                System.out.print("> ");
-                System.out.flush();
+                System.out.print("> "); System.out.flush();
                 return;
             }
             System.out.println("[TAB] closing: " + targetId);
-            BridgeService.closeTabFromStdin(targetId);
+            BridgeCommands.closeTabFromStdin(targetId);
             return;
         }
 
-        // ========================================================
-        //  /tab <n|id>
-        // ========================================================
         if (trimmed.startsWith("/tab ")) {
             String arg = trimmed.substring("/tab ".length()).trim();
             if (arg.isEmpty()) {
                 System.out.println("[TAB] usage: /tab <n|id>");
-                System.out.print("> ");
-                System.out.flush();
+                System.out.print("> "); System.out.flush();
                 return;
             }
             boolean ok;
             try {
                 int idx = Integer.parseInt(arg);
-                ok = BridgeService.selectTabByIndex(idx);
+                ok = BridgeCommands.selectTabByIndex(idx);
             } catch (NumberFormatException e) {
-                ok = BridgeService.selectTabById(arg)
-                        || BridgeService.selectTabByPrefix(arg);
+                ok = BridgeCommands.selectTabById(arg)
+                        || BridgeCommands.selectTabByPrefix(arg);
             }
             if (!ok) {
                 System.out.println("[TAB] not found: " + arg);
             }
-            BridgeService.printTabs();
+            BridgeCommands.printTabs();
             return;
         }
 
         if (trimmed.startsWith("!")) {
-            BridgeService.sendEvalFromStdin(trimmed.substring(1).trim());
+            BridgeCommands.sendEvalFromStdin(trimmed.substring(1).trim());
             return;
         }
 
-        // --- обычный текст ---
-        session.addMessage("user", line);
-        BridgeService.sendFromStdin(line);
+        SessionManager.addMessage("user", line);
+        BridgeCommands.sendFromStdin(line);
     }
 }

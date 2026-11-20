@@ -1,6 +1,27 @@
 (() => {
   "use strict";
 
+  // ============================================================
+  //  НОВОЕ: guard — регистрируемся ТОЛЬКО на chat.deepseek.com.
+  //  Скрипт может быть внедрён и на других страницах, если
+  //  matches в manifest.json слишком широкий; на любой
+  //  странице вне chat.deepseek.com молча выходим, не
+  //  регистрируемся, не шлём /log, не открываем SSE.
+  // ============================================================
+  const DS_HOST = "chat.deepseek.com";
+
+  function isDeepSeekPage() {
+    try {
+      return location.protocol === "https:"
+          && location.hostname === DS_HOST;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  if (!isDeepSeekPage()) return;              // не наш URL — до свидания
+  if (window.top !== window) return;          // не регистрируемся из iframe
+
   const CHANNEL    = "__ds_stream_chunk__";
   const EVT_EXEC   = "__ds_execute_cmd__";
   const EVT_CONSOLE= "__ds_console__";
@@ -21,6 +42,8 @@
 
   let postQueue = Promise.resolve();
   function postLog(level, text, streamId, streamType) {
+    // НОВОЕ: не шлём логи с неверного URL
+    if (!isDeepSeekPage()) return postQueue;
     const payload = { level, text, tabId: TAB_ID };
     if (streamId) payload.streamId = streamId;
     if (streamType) payload.streamType = streamType;
@@ -39,6 +62,8 @@
   //  НОВОЕ: надёжная отправка tab-op лога даже при закрытии вкладки
   // ============================================================
   function postTabOp(text) {
+    // НОВОЕ: не шлём tab-op с неверного URL
+    if (!isDeepSeekPage()) return;
     try {
       const body = JSON.stringify({ level: "tab-op", text, tabId: TAB_ID });
       if (navigator.sendBeacon) {
@@ -58,6 +83,9 @@
   }
 
   // ---------- уведомление сервера о закрытии вкладки ----------
+  // sendBye НЕ оборачиваем в isDeepSeekPage(): он вызывается ровно
+  // в момент выгрузки страницы, когда URL ещё старый. Нам важно,
+  // чтобы сервер снял регистрацию.
   let byeSent = false;
   function sendBye(reason) {
     if (byeSent) return;
@@ -263,8 +291,10 @@
 
   // ============================================================
   //  НОВОЕ: регистрация с background для управления вкладками
+  //  (только если мы всё ещё на chat.deepseek.com)
   // ============================================================
   function registerWithBackground() {
+    if (!isDeepSeekPage()) return;
     try {
       chrome.runtime.sendMessage(
           { type: "register_tab", tabId: TAB_ID },
@@ -280,6 +310,10 @@
   //  НОВОЕ: обработчик команд управления вкладками
   // ============================================================
   function handleTabCommand(cmd) {
+    // НОВОЕ: если вдруг URL сменился (SPA-навигация), команды
+    // управления вкладками всё равно шлём только с deepseek
+    if (!isDeepSeekPage()) return;
+
     const type = cmd && cmd.type;
 
     if (type === "openTab") {
@@ -364,6 +398,10 @@
   }
 
   function connectSSE() {
+    // НОВОЕ: если URL внезапно стал не-deepseek (SPA-навигация / уход со страницы),
+    // не открываем EventSource
+    if (!isDeepSeekPage()) return;
+
     if (es) {
       try { es.close(); } catch (_) {}
       es = null;
@@ -411,3 +449,4 @@
 
   console.info(`${TAG} listener installed, tabId=${TAB_ID}`);
 })();
+

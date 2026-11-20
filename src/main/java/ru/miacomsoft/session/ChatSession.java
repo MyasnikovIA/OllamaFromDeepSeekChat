@@ -1,4 +1,4 @@
-package ru.miacomsoft;
+package ru.miacomsoft.session;
 
 import org.json.JSONArray;
 import org.json.JSONObject;

@@ -44,7 +44,7 @@ public final class ChromeLauncher {
     }
 
     // ============================================================
-    //  НОВОЕ: открыть Chrome с произвольным URL (fallback для /opentab)
+    //  открыть Chrome с произвольным URL (fallback для /opentab)
     // ============================================================
     public static void launchNewWindow(String url) {
         String target = (url == null || url.trim().isEmpty()) ? DEEPSEEK_URL : url.trim();
@@ -117,7 +117,12 @@ public final class ChromeLauncher {
     static void launchChrome(String chrome, String url) throws IOException {
         List<String> cmd = new ArrayList<>();
         cmd.add(chrome);
-        cmd.add("--new-window");
+        // ============================================================
+        //  ИЗМЕНЕНО: убран --new-window.
+        //  На первом запуске со свежим --user-data-dir Chrome
+        //  открывал ДВА окна: одно с дефолтной страницей, второе
+        //  с указанным URL. Одно окно с целевым URL — то, что нужно.
+        // ============================================================
         cmd.add("--no-first-run");
         cmd.add("--no-default-browser-check");
 

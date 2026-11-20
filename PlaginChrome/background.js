@@ -8,6 +8,19 @@ const MAX = 500;
 /** customTabId (UUID из content.js) → chrome.tab.id */
 const tabMap = new Map();
 
+// ============================================================
+//  НОВОЕ: проверка, что URL принадлежит chat.deepseek.com
+// ============================================================
+function isDeepSeekUrl(url) {
+  if (!url) return false;
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" && u.hostname === "chat.deepseek.com";
+  } catch (_) {
+    return false;
+  }
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg) return;
 
@@ -26,13 +39,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // ============================================================
   //  НОВОЕ: регистрация вкладки (content script → background)
-  //  sender.tab.id — это реальный chrome.tab.id текущей вкладки
+  //  sender.tab.id — реальный chrome.tab.id текущей вкладки.
+  //  sender.tab.url — её URL; регистрируем ТОЛЬКО chat.deepseek.com.
   // ============================================================
   if (msg.type === "register_tab") {
     const chromeTabId = sender.tab && sender.tab.id;
+    const tabUrl = sender.tab && sender.tab.url;
+
+    if (!isDeepSeekUrl(tabUrl)) {
+      console.warn("[bg] register_tab rejected, not deepseek:", tabUrl);
+      sendResponse({ ok: false, error: "not a deepseek page: " + tabUrl });
+      return true;
+    }
+
     if (chromeTabId != null && msg.tabId) {
       tabMap.set(msg.tabId, chromeTabId);
-      console.info("[bg] registered tab", msg.tabId, "-> chrome", chromeTabId);
+      console.info("[bg] registered tab", msg.tabId, "-> chrome", chromeTabId, tabUrl);
       sendResponse({ ok: true, chromeTabId });
     } else {
       sendResponse({ ok: false, error: "no sender.tab.id" });
