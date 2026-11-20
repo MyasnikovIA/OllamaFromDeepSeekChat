@@ -7,7 +7,10 @@
   const EVT_RESULT = "__ds_eval_result__";
   const EVT_READY  = "__ds_injected_ready__";
   const TAG        = "[DS-INTERCEPT]";
-  const SERVER     = "http://localhost:8085";
+
+  // ИЗМЕНЕНО: Порт 11434
+  const SERVER     = "http://127.0.0.1:11434";
+
   const RECONNECT_MS = 5000;
 
   let postQueue = Promise.resolve();

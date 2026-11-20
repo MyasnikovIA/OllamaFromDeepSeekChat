@@ -50,7 +50,8 @@
     try { return JSON.stringify(a); } catch { return String(a); }
   };
 
-  const SKIP_PREFIXES = ["[DS-INTERCEPT]", "[DS] "];
+  // ИЗМЕНЕНО: добавлен "[Captcha]" чтобы не спамить в логи
+  const SKIP_PREFIXES = ["[DS-INTERCEPT]", "[DS] ", "[Captcha] "];
 
   ["log", "info", "warn", "error", "debug"].forEach((level) => {
     const orig = console[level].bind(console);
@@ -180,9 +181,21 @@
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+  // ИЗМЕНЕНО: Функция ожидания появления элемента на странице (до 10 секунд)
+  async function waitForElement(selector, timeout = 10000) {
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+      const el = document.querySelector(selector);
+      if (el) return el;
+      await sleep(100);
+    }
+    return null;
+  }
+
   // ---------- sendToDeepSeek ----------
   async function sendToDeepSeek(text) {
-    const input = document.querySelector('[placeholder="Сообщение для DeepSeek"]');
+    // Ждем загрузки поля ввода
+    const input = await waitForElement('[placeholder="Сообщение для DeepSeek"]');
     if (!input) throw new Error("[DS] Поле ввода не найдено");
 
     const rect = input.getBoundingClientRect();
@@ -227,18 +240,24 @@
 
     await sleep(100);
 
+    // ИЗМЕНЕНО: Ждем, пока кнопка отправки станет активной (до 5 секунд)
     let sendBtn = null;
-    const icons = document.querySelectorAll(".ds-button__icon.ds-button__icon--last-child");
-    for (const icon of icons) {
-      const path = icon.querySelector("svg path");
-      if (path && /M8\.3125\s+0\.980206/.test(path.getAttribute("d") || "")) {
-        sendBtn =
-            icon.closest(".ds-button") ||
-            icon.closest("button") ||
-            icon.parentElement ||
-            icon;
-        break;
+    const btnStartTime = Date.now();
+    while (Date.now() - btnStartTime < 5000) {
+      const icons = document.querySelectorAll(".ds-button__icon.ds-button__icon--last-child");
+      for (const icon of icons) {
+        const path = icon.querySelector("svg path");
+        if (path && /M8\.3125\s+0\.980206/.test(path.getAttribute("d") || "")) {
+          sendBtn =
+              icon.closest(".ds-button") ||
+              icon.closest("button") ||
+              icon.parentElement ||
+              icon;
+          break;
+        }
       }
+      if (sendBtn) break;
+      await sleep(100);
     }
 
     if (!sendBtn) throw new Error("[DS] Кнопка отправки не найдена");
@@ -263,48 +282,58 @@
 
   // ---------- функция 1: создать новый чат ----------
   async function newChat() {
-    // 1.1 Найти кнопку «+» (по SVG path M9.67272 0.522841)
+    // ИЗМЕНЕНО: Ждем кнопку "+"
     let plusBtn = null;
-    for (const p of document.querySelectorAll("svg path")) {
-      const d = p.getAttribute("d") || "";
-      if (d.includes("M9.67272 0.522841")) {
-        plusBtn = p.closest('[role="button"]') || p.closest("button");
-        if (plusBtn) break;
+    const plusStart = Date.now();
+    while (Date.now() - plusStart < 10000) {
+      for (const p of document.querySelectorAll("svg path")) {
+        const d = p.getAttribute("d") || "";
+        if (d.includes("M9.67272 0.522841")) {
+          plusBtn = p.closest('[role="button"]') || p.closest("button");
+          if (plusBtn) break;
+        }
       }
+      if (plusBtn) break;
+      await sleep(100);
     }
+
     if (!plusBtn) throw new Error("[DS] Кнопка '+' не найдена");
     clickWithMouse(plusBtn);
 
-    await sleep(3000);
+    await sleep(1000);
 
-    // 1.2 Найти пункт «Новый чат»
+    // Ищем пункт «Новый чат»
     let newChatBtn = null;
-    const candidates = document.querySelectorAll('div[tabindex="0"], [role="button"]');
-    for (const el of candidates) {
-      const spans = el.querySelectorAll("span");
-      for (const s of spans) {
-        if ((s.textContent || "").trim() === "Новый чат") {
-          newChatBtn = el;
-          break;
+    const chatStart = Date.now();
+    while (Date.now() - chatStart < 3000) {
+      const candidates = document.querySelectorAll('div[tabindex="0"], [role="button"]');
+      for (const el of candidates) {
+        const spans = el.querySelectorAll("span");
+        for (const s of spans) {
+          if ((s.textContent || "").trim() === "Новый чат") {
+            newChatBtn = el;
+            break;
+          }
+        }
+        if (newChatBtn) break;
+      }
+      if (!newChatBtn) {
+        for (const p of document.querySelectorAll("svg path")) {
+          const d = p.getAttribute("d") || "";
+          if (d.startsWith("M8 0.599609")) {
+            newChatBtn = p.closest('[tabindex="0"]') || p.closest('[role="button"]');
+            if (newChatBtn) break;
+          }
         }
       }
       if (newChatBtn) break;
+      await sleep(100);
     }
-    if (!newChatBtn) {
-      // fallback: искать по SVG path M8 0.599609 (иконка внутри пункта)
-      for (const p of document.querySelectorAll("svg path")) {
-        const d = p.getAttribute("d") || "";
-        if (d.startsWith("M8 0.599609")) {
-          newChatBtn = p.closest('[tabindex="0"]') || p.closest('[role="button"]');
-          if (newChatBtn) break;
-        }
-      }
-    }
+
     if (!newChatBtn) throw new Error("[DS] Пункт 'Новый чат' не найден");
 
     clickWithMouse(newChatBtn);
-
-    await sleep(3000);
+    await sleep(2000);
 
     console.log("[DS] ✔ Новый чат создан");
     return true;
@@ -312,27 +341,20 @@
 
   // ---------- поиск переключателя «Глубокое мышление» ----------
   function findThinkingToggle() {
-    // 1) по тексту внутри (Глубокое мышление / DeepThink / R1)
     for (const el of document.querySelectorAll("[aria-pressed]")) {
       const text = (el.textContent || "").trim();
-      if (/Глубокое мышление/i.test(text) ||
-          /Deep\s*Think/i.test(text) ||
-          /^R1$/i.test(text)) {
+      if (/Глубокое мышление/i.test(text) || /Deep\s*Think/i.test(text) || /^R1$/i.test(text)) {
         return el;
       }
       const title = el.getAttribute("title") || el.getAttribute("aria-label") || "";
-      if (/Глубокое мышление/i.test(title) ||
-          /Deep\s*Think/i.test(title)) {
+      if (/Глубокое мышление/i.test(title) || /Deep\s*Think/i.test(title)) {
         return el;
       }
     }
-    // 2) по иконке мозга (path M8.00192 6.64454 ...) внутри [aria-pressed]
     for (const el of document.querySelectorAll("[aria-pressed]")) {
       for (const p of el.querySelectorAll("svg path")) {
         const d = p.getAttribute("d") || "";
-        if (d.startsWith("M8.00192 6.64454")) {
-          return el;
-        }
+        if (d.startsWith("M8.00192 6.64454")) return el;
       }
     }
     return null;
@@ -340,14 +362,11 @@
 
   // ---------- функция 2: включить режим размышления ----------
   async function enableThinking() {
-    const toggle = findThinkingToggle();
+    const toggle = await waitForElement("[aria-pressed]", 3000).then(() => findThinkingToggle());
     if (!toggle) throw new Error("[DS] Переключатель 'Глубокое мышление' не найден");
 
     const pressed = toggle.getAttribute("aria-pressed") === "true";
-    if (pressed) {
-      console.log("[DS] ✔ Режим размышления уже включён");
-      return true;
-    }
+    if (pressed) return true;
 
     clickWithMouse(toggle);
     await sleep(500);
@@ -355,20 +374,16 @@
     if (toggle.getAttribute("aria-pressed") !== "true") {
       throw new Error("[DS] Не удалось включить режим размышления");
     }
-    console.log("[DS] ✔ Режим размышления включён");
     return true;
   }
 
   // ---------- функция 3: выключить режим размышления ----------
   async function disableThinking() {
-    const toggle = findThinkingToggle();
+    const toggle = await waitForElement("[aria-pressed]", 3000).then(() => findThinkingToggle());
     if (!toggle) throw new Error("[DS] Переключатель 'Глубокое мышление' не найден");
 
     const pressed = toggle.getAttribute("aria-pressed") === "true";
-    if (!pressed) {
-      console.log("[DS] ✔ Режим размышления уже выключен");
-      return true;
-    }
+    if (!pressed) return true;
 
     clickWithMouse(toggle);
     await sleep(500);
@@ -376,7 +391,6 @@
     if (toggle.getAttribute("aria-pressed") === "true") {
       throw new Error("[DS] Не удалось выключить режим размышления");
     }
-    console.log("[DS] ✔ Режим размышления выключен");
     return true;
   }
 

@@ -23,9 +23,21 @@ import java.util.concurrent.TimeUnit;
  */
 public class Main {
 
-    public static final int PORT = 8085;
+    // ИЗМЕНЕНО: Порт 11434 (стандартный порт Ollama)
+    public static final int PORT = 11434;
 
     public static void main(String[] args) throws Exception {
+        boolean noBrowser = false;
+        for (String arg : args) {
+            if ("--no-browser".equals(arg)) {
+                noBrowser = true;
+            } else if (arg.startsWith("--extension=")) {
+                System.setProperty("ds.extension.dir", arg.substring("--extension=".length()));
+            } else if (arg.startsWith("--profile=")) {
+                System.setProperty("ds.profile.dir", arg.substring("--profile=".length()));
+            }
+        }
+
         HttpServer server = HttpServer.create(new InetSocketAddress(PORT), 0);
         server.setExecutor(Executors.newCachedThreadPool());
 
@@ -37,6 +49,11 @@ public class Main {
 
         ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
         sched.scheduleAtFixedRate(BridgeService::watchdogTick, 10, 10, TimeUnit.SECONDS);
+
+        // ИЗМЕНЕНО: Запуск браузера после старта сервера
+        if (!noBrowser && !"true".equals(System.getProperty("ds.no.browser"))) {
+            ChromeLauncher.openDeepSeek();
+        }
 
         Thread stdinThread = new Thread(() -> {
             try {
@@ -80,41 +97,31 @@ public class Main {
     static void handleStdin(String line) {
         String trimmed = line.trim();
 
-        // /help
         if (trimmed.equals("/help") || trimmed.equals("/?")) {
             printBanner();
             return;
         }
 
-        // /new
         if (trimmed.equals("/new") || trimmed.equals("/newchat")) {
             BridgeService.sendNewChatFromStdin();
             return;
         }
 
-        // /think on|off
         if (trimmed.equals("/think on") || trimmed.equals("/think")) {
-            if (trimmed.equals("/think")) {
-                // без аргумента — просто включить
-                BridgeService.sendEnableThinkingFromStdin();
-                return;
-            }
             BridgeService.sendEnableThinkingFromStdin();
             return;
         }
+
         if (trimmed.equals("/think off")) {
             BridgeService.sendDisableThinkingFromStdin();
             return;
         }
 
-        // !js...
         if (trimmed.startsWith("!")) {
             BridgeService.sendEvalFromStdin(trimmed.substring(1).trim());
             return;
         }
 
-        // обычный текст → sendToDeepSeek
         BridgeService.sendFromStdin(line);
     }
 }
-

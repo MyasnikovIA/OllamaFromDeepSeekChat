@@ -6,8 +6,8 @@
   "permissions": ["storage"],
   "host_permissions": [
     "https://chat.deepseek.com/*",
-    "http://localhost:8085/*",
-    "http://127.0.0.1:8085/*"
+    "http://localhost:11434/*",
+    "http://127.0.0.1:11434/*"
   ],
   "content_scripts": [
     {
