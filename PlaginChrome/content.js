@@ -70,6 +70,7 @@
     } catch (_) {}
   }
 
+  // ---------- уведомление сервера о закрытии вкладки ----------
   let byeSent = false;
   function sendBye(reason) {
     if (byeSent) return;
@@ -97,18 +98,12 @@
     } catch (_) {}
   }
 
+  // ИСПРАВЛЕНО: используем только pagehide, так как unload запрещён в Chrome
   window.addEventListener("pagehide", (e) => {
     sendBye(e && e.persisted ? "pagehide-persisted" : "pagehide");
   }, { capture: true });
 
-  window.addEventListener("beforeunload", () => {
-    sendBye("beforeunload");
-  }, { capture: true });
-
-  window.addEventListener("unload", () => {
-    sendBye("unload");
-  }, { capture: true });
-
+  // ---------- стримы ----------
   const streams = new Map();
 
   function getStream(streamId) {
@@ -235,7 +230,6 @@
   window.addEventListener(EVT_CONSOLE, (evt) => {
     const { level = "log", text = "" } = evt.detail || {};
     if (!text || !text.trim()) return;
-    // Сервер реагирует только на "console-error"; маппим error → console-error
     postLog(level === "error" ? "console-error" : level, text);
   });
 
