@@ -50,7 +50,6 @@
     try { return JSON.stringify(a); } catch { return String(a); }
   };
 
-  // ИЗМЕНЕНО: добавлен "[Captcha]" чтобы не спамить в логи
   const SKIP_PREFIXES = ["[DS-INTERCEPT]", "[DS] ", "[Captcha] "];
 
   ["log", "info", "warn", "error", "debug"].forEach((level) => {
@@ -181,7 +180,6 @@
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  // ИЗМЕНЕНО: Функция ожидания появления элемента на странице (до 10 секунд)
   async function waitForElement(selector, timeout = 10000) {
     const start = Date.now();
     while (Date.now() - start < timeout) {
@@ -190,6 +188,95 @@
       await sleep(100);
     }
     return null;
+  }
+
+  // ---------- НОВОЕ: загрузка файлов в DeepSeek ----------
+  function base64ToBlob(b64, mime) {
+    const bin = atob(b64 || "");
+    const len = bin.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+    return new Blob([bytes], { type: mime || "application/octet-stream" });
+  }
+
+  async function uploadFilesToInput(files) {
+    if (!files || files.length === 0) return true;
+
+    // Ждём появления скрытого input[type=file] на странице
+    let input = await waitForElement('input[type="file"]', 8000);
+    if (!input) {
+      // Иногда input создаётся динамически только при клике на «прикрепить».
+      // Пробуем кликнуть по кнопке-скрепке, чтобы создать/активировать input.
+      for (const el of document.querySelectorAll('[role="button"], button')) {
+        const label = (el.getAttribute("aria-label") || el.getAttribute("title") || "").toLowerCase();
+        if (label.includes("attach") || label.includes("файл") || label.includes("upload")) {
+          try { clickWithMouse(el); } catch (_) {}
+          await sleep(200);
+          input = document.querySelector('input[type="file"]');
+          if (input) break;
+        }
+      }
+    }
+    if (!input) {
+      throw new Error("[DS] input[type=file] не найден на странице");
+    }
+
+    if (files.length > 1 && !input.multiple) {
+      input.multiple = true;
+    }
+
+    const dt = new DataTransfer();
+    for (const f of files) {
+      const blob = base64ToBlob(f.dataBase64, f.mimeType);
+      const fileName = f.name || ("file-" + Date.now());
+      const file = new File([blob], fileName, {
+        type: f.mimeType || "application/octet-stream"
+      });
+      dt.items.add(file);
+    }
+
+    try {
+      input.files = dt.files;
+    } catch (_) {
+      Object.defineProperty(input, "files", {
+        configurable: true,
+        get: () => dt.files
+      });
+    }
+
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+
+    await waitForUploadSettle(files.length);
+    return true;
+  }
+
+  async function waitForUploadSettle(fileCount, timeoutMs = 30000) {
+    const start = Date.now();
+    let sawProgress = false;
+
+    // Дать React/Vue отреагировать на change
+    await sleep(400);
+
+    while (Date.now() - start < timeoutMs) {
+      const progress = document.querySelectorAll(
+          '[class*="uploading"], [class*="upload-progress"], [role="progressbar"]'
+      );
+      if (progress.length > 0) {
+        sawProgress = true;
+        await sleep(250);
+        continue;
+      }
+      if (sawProgress) {
+        // Прогресс был и исчез — считаем, что загрузка завершена
+        await sleep(300);
+        return true;
+      }
+      // Не увидели индикатора — даём фиксированное окно, но не растягиваем
+      if (Date.now() - start > 3000) return true;
+      await sleep(200);
+    }
+    return true;
   }
 
   // ---------- авто-продолжение ответа (Continue) ----------
@@ -270,13 +357,17 @@
       document.addEventListener("DOMContentLoaded", scheduleContinueCheck, { once: true });
     }
 
-    // страховка на случай пропущенных мутаций
     setInterval(scheduleContinueCheck, 2000);
   }
 
   // ---------- sendToDeepSeek ----------
-  async function sendToDeepSeek(text) {
-    // Ждем загрузки поля ввода
+  async function sendToDeepSeek(text, files) {
+    // 1) Если есть файлы — сначала загружаем их
+    if (files && files.length > 0) {
+      await uploadFilesToInput(files);
+    }
+
+    // 2) Находим поле ввода
     const input = await waitForElement('[placeholder="Сообщение для DeepSeek"]');
     if (!input) throw new Error("[DS] Поле ввода не найдено");
 
@@ -294,51 +385,60 @@
 
     await sleep(50);
 
-    if (input.isContentEditable) {
-      const range = document.createRange();
-      range.selectNodeContents(input);
-      range.collapse(false);
-      const sel = window.getSelection();
-      sel.removeAllRanges();
-      sel.addRange(range);
+    // 3) Если есть текст — вставляем его
+    if (text && text.length > 0) {
+      if (input.isContentEditable) {
+        const range = document.createRange();
+        range.selectNodeContents(input);
+        range.collapse(false);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
 
-      const ok = document.execCommand("insertText", false, text);
-      if (!ok) {
-        input.textContent = text;
-        input.dispatchEvent(new InputEvent("input", {
-          bubbles: true, data: text, inputType: "insertText"
-        }));
+        const ok = document.execCommand("insertText", false, text);
+        if (!ok) {
+          input.textContent = text;
+          input.dispatchEvent(new InputEvent("input", {
+            bubbles: true, data: text, inputType: "insertText"
+          }));
+        }
+      } else if (input.tagName === "TEXTAREA" || input.tagName === "INPUT") {
+        const proto = input.tagName === "TEXTAREA"
+            ? HTMLTextAreaElement.prototype
+            : HTMLInputElement.prototype;
+        Object.getOwnPropertyDescriptor(proto, "value").set.call(input, text);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      } else {
+        throw new Error("[DS] Неизвестный тип поля ввода");
       }
-    } else if (input.tagName === "TEXTAREA" || input.tagName === "INPUT") {
-      const proto = input.tagName === "TEXTAREA"
-          ? HTMLTextAreaElement.prototype
-          : HTMLInputElement.prototype;
-      Object.getOwnPropertyDescriptor(proto, "value").set.call(input, text);
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-      input.dispatchEvent(new Event("change", { bubbles: true }));
-    } else {
-      throw new Error("[DS] Неизвестный тип поля ввода");
     }
 
     await sleep(100);
 
-    // ИЗМЕНЕНО: Ждем, пока кнопка отправки станет активной (до 5 секунд)
+    // 4) Ждём появления и активации кнопки «Отправить» (до 15 с — с учётом загрузки файла)
     let sendBtn = null;
     const btnStartTime = Date.now();
-    while (Date.now() - btnStartTime < 5000) {
-      const icons = document.querySelectorAll(".ds-button__icon.ds-button__icon--last-child");
-      for (const icon of icons) {
-        const path = icon.querySelector("svg path");
-        if (path && /M8\.3125\s+0\.980206/.test(path.getAttribute("d") || "")) {
-          sendBtn =
-              icon.closest(".ds-button") ||
-              icon.closest("button") ||
-              icon.parentElement ||
-              icon;
-          break;
+    while (Date.now() - btnStartTime < 15000) {
+      if (!sendBtn) {
+        const icons = document.querySelectorAll(".ds-button__icon.ds-button__icon--last-child");
+        for (const icon of icons) {
+          const path = icon.querySelector("svg path");
+          if (path && /M8\.3125\s+0\.980206/.test(path.getAttribute("d") || "")) {
+            sendBtn =
+                icon.closest(".ds-button") ||
+                icon.closest("button") ||
+                icon.parentElement ||
+                icon;
+            break;
+          }
         }
       }
-      if (sendBtn) break;
+      if (sendBtn) {
+        const disabled = sendBtn.disabled
+            || sendBtn.getAttribute("aria-disabled") === "true";
+        if (!disabled) break;
+      }
       await sleep(100);
     }
 
@@ -358,13 +458,14 @@
     sendBtn.dispatchEvent(new MouseEvent("mouseup", bOpts));
     sendBtn.dispatchEvent(new MouseEvent("click", bOpts));
 
-    console.log("[DS] ✔ Отправлено:", text);
+    console.log("[DS] ✔ Отправлено:",
+        (files && files.length ? "[" + files.length + " файл(ов)] " : "")
+        + (text || ""));
     return true;
   }
 
-  // ---------- функция 1: создать новый чат ----------
+  // ---------- новый чат ----------
   async function newChat() {
-    // ИЗМЕНЕНО: Ждем кнопку "+"
     let plusBtn = null;
     const plusStart = Date.now();
     while (Date.now() - plusStart < 10000) {
@@ -384,7 +485,6 @@
 
     await sleep(1000);
 
-    // Ищем пункт «Новый чат»
     let newChatBtn = null;
     const chatStart = Date.now();
     while (Date.now() - chatStart < 3000) {
@@ -421,7 +521,7 @@
     return true;
   }
 
-  // ---------- поиск переключателя «Глубокое мышление» ----------
+  // ---------- переключатель «Глубокое мышление» ----------
   function findThinkingToggle() {
     for (const el of document.querySelectorAll("[aria-pressed]")) {
       const text = (el.textContent || "").trim();
@@ -442,7 +542,6 @@
     return null;
   }
 
-  // ---------- функция 2: включить режим размышления ----------
   async function enableThinking() {
     const toggle = await waitForElement("[aria-pressed]", 3000).then(() => findThinkingToggle());
     if (!toggle) throw new Error("[DS] Переключатель 'Глубокое мышление' не найден");
@@ -459,7 +558,6 @@
     return true;
   }
 
-  // ---------- функция 3: выключить режим размышления ----------
   async function disableThinking() {
     const toggle = await waitForElement("[aria-pressed]", 3000).then(() => findThinkingToggle());
     if (!toggle) throw new Error("[DS] Переключатель 'Глубокое мышление' не найден");
@@ -476,9 +574,8 @@
     return true;
   }
 
-  // ---------- НОВОЕ: поиск переключателя «Умный поиск» ----------
+  // ---------- переключатель «Умный поиск» ----------
   function findSmartSearchToggle() {
-    // 1) основной признак — текст span'а внутри [aria-pressed]
     for (const el of document.querySelectorAll("[aria-pressed]")) {
       const spans = el.querySelectorAll("span");
       for (const s of spans) {
@@ -488,7 +585,6 @@
       const title = el.getAttribute("title") || el.getAttribute("aria-label") || "";
       if (/^(Search|Умный поиск)$/i.test(title)) return el;
     }
-    // 2) fallback — по характерному SVG-path ручки лупы
     for (const el of document.querySelectorAll("[aria-pressed]")) {
       let hasSearchHandle = false;
       let isThinking = false;
@@ -506,7 +602,6 @@
     return null;
   }
 
-  // ---------- НОВОЕ: ожидание переключателя «Умный поиск» ----------
   async function waitForSmartSearchToggle(timeout = 5000) {
     const start = Date.now();
     while (Date.now() - start < timeout) {
@@ -517,7 +612,6 @@
     return null;
   }
 
-  // ---------- НОВОЕ: включить умный поиск ----------
   async function enableSmartSearch() {
     const toggle = await waitForSmartSearchToggle();
     if (!toggle) throw new Error("[DS] Переключатель 'Умный поиск' не найден");
@@ -534,7 +628,6 @@
     return true;
   }
 
-  // ---------- НОВОЕ: выключить умный поиск ----------
   async function disableSmartSearch() {
     const toggle = await waitForSmartSearchToggle();
     if (!toggle) throw new Error("[DS] Переключатель 'Умный поиск' не найден");
@@ -573,8 +666,8 @@
 
       switch (data.type) {
         case "send":
-          window.sendToDeepSeek(data.text)
-              .then(() => emitResult(true, "sent: " + data.text))
+          window.sendToDeepSeek(data.text, data.files)
+              .then(() => emitResult(true, "sent: " + (data.text || "")))
               .catch((e) => emitResult(false, "send failed: " + (e && e.message || e)));
           return;
 

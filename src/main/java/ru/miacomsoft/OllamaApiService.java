@@ -10,51 +10,36 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Эмуляция Ollama API поверх BridgeService.
  *
- * Реальный Ollama отдаёт ОДНОВРЕМЕННО два набора эндпоинтов:
- *   - нативный  /api/*   (Ollama-native)
- *   - OpenAI-совместимый /v1/*   (для клиентов, умеющих только OpenAI)
- *
- * Доступные эндпоинты:
- *
- *   --- Native Ollama ---
- *   GET    /                      → "Ollama is running"
- *   GET    /api/version           → {"version":"0.1.0"}
- *   GET    /api/tags              → одна модель: DeepSeekCloud
- *   GET    /api/ps                → пусто
- *   POST   /api/chat              → stream / non-stream
- *   POST   /api/generate          → stream / non-stream
- *   POST   /api/show              → метаданные модели
- *   POST   /api/embed             → нулевой вектор
- *   POST   /api/pull              → стрим, успешный
- *   POST   /api/push              → {"status":"success"}
- *   POST   /api/create            → 200 OK
- *   POST   /api/copy              → 404
- *   DELETE /api/delete            → 200 OK
- *
- *   --- OpenAI-compatible (/v1/*) ---
- *   GET    /v1/models
- *   GET    /v1/models/{id}
- *   POST   /v1/chat/completions   → stream (SSE) / non-stream
- *   POST   /v1/completions        → stream (SSE) / non-stream
- *   POST   /v1/embeddings
+ * Поддерживает мультимодальные запросы:
+ *   - Ollama native:     messages[].images = ["base64..."]  (или generate.images)
+ *   - OpenAI:            messages[].content = [{type:"text"}, {type:"image_url"}]
+ *   - Anthropic-style:   messages[].content = [{type:"image", source:{...}}]
+ *   - Расширенный:       messages[].content = [{type:"file", file:{name, mimeType, dataBase64}}]
  */
 public class OllamaApiService {
 
     static final String MODEL_NAME = "DeepSeekCloud";
     static final String MODIFIED_AT = "2024-01-01T00:00:00Z";
     static final String DIGEST = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
-    static final long   CREATED_EPOCH = 1704067200L; // 2024-01-01T00:00:00Z
+    static final long   CREATED_EPOCH = 1704067200L;
 
-    static final AtomicLong createdCounter = new AtomicLong();
+    // ---------- извлечённый пользовательский ввод ----------
+    static class UserInput {
+        String text = "";
+        final List<BridgeService.Attachment> attachments = new ArrayList<>();
+        boolean hasContent() {
+            return (text != null && !text.trim().isEmpty()) || !attachments.isEmpty();
+        }
+    }
 
     public static void register(HttpServer server) {
-        // --- Native Ollama API ---
         server.createContext("/",              OllamaApiService::handleRoot);
         server.createContext("/api/version",   OllamaApiService::handleVersion);
         server.createContext("/api/tags",      OllamaApiService::handleTags);
@@ -69,11 +54,149 @@ public class OllamaApiService {
         server.createContext("/api/copy",      OllamaApiService::handleCopy);
         server.createContext("/api/delete",    OllamaApiService::handleDelete);
 
-        // --- OpenAI-compatible API (как у настоящего Ollama) ---
-        // Один контекст /v1 с внутренней маршрутизацией:
-        // так корректно работают и /v1/models, и /v1/models/{id},
-        // и /v1/chat/completions, и /v1/completions, и /v1/embeddings.
         server.createContext("/v1", OllamaApiService::handleV1);
+    }
+
+    // =====================================================================
+    //  ИЗВЛЕЧЕНИЕ ПОЛЬЗОВАТЕЛЬСКОГО ВВОДА
+    // =====================================================================
+
+    static UserInput extractUserInput(JSONObject req) {
+        UserInput out = new UserInput();
+        if (req == null || !req.has("messages")) return out;
+        JSONArray msgs = req.optJSONArray("messages");
+        if (msgs == null) return out;
+
+        JSONObject userMsg = null;
+        for (int i = msgs.length() - 1; i >= 0; i--) {
+            Object mo = msgs.opt(i);
+            if (!(mo instanceof JSONObject)) continue;
+            JSONObject m = (JSONObject) mo;
+            if ("user".equals(m.optString("role"))) { userMsg = m; break; }
+        }
+        if (userMsg == null) return out;
+
+        // content: строка или массив частей
+        Object content = userMsg.opt("content");
+        if (content instanceof String) {
+            out.text = (String) content;
+        } else if (content instanceof JSONArray) {
+            JSONArray parts = (JSONArray) content;
+            for (int i = 0; i < parts.length(); i++) {
+                Object po = parts.opt(i);
+                if (!(po instanceof JSONObject)) continue;
+                JSONObject p = (JSONObject) po;
+                String type = p.optString("type", "");
+                if ("text".equals(type) || "input_text".equals(type)) {
+                    String t = p.optString("text", "");
+                    if (!t.isEmpty()) {
+                        if (!out.text.isEmpty()) out.text += "\n";
+                        out.text += t;
+                    }
+                } else if ("image_url".equals(type) || "input_image".equals(type)) {
+                    Object imgObj = p.opt("image_url");
+                    String url = null;
+                    if (imgObj instanceof JSONObject) {
+                        url = ((JSONObject) imgObj).optString("url", null);
+                    } else if (imgObj instanceof String) {
+                        url = (String) imgObj;
+                    }
+                    if (url != null && url.startsWith("data:")) {
+                        BridgeService.Attachment a = parseDataUrl(url, "image");
+                        if (a != null) out.attachments.add(a);
+                    }
+                } else if ("image".equals(type)) {
+                    // Anthropic-style
+                    Object srcObj = p.opt("source");
+                    if (srcObj instanceof JSONObject) {
+                        JSONObject src = (JSONObject) srcObj;
+                        if ("base64".equals(src.optString("type"))) {
+                            String data  = src.optString("data", "");
+                            String media = src.optString("media_type", "image/png");
+                            if (!data.isEmpty()) {
+                                String ext = media.contains("/")
+                                        ? media.substring(media.indexOf('/') + 1)
+                                        : "png";
+                                out.attachments.add(new BridgeService.Attachment(
+                                        "image." + ext, media, data));
+                            }
+                        }
+                    }
+                } else if ("file".equals(type)) {
+                    // Расширенный формат: {type:"file", file:{name, mimeType, dataBase64}}
+                    Object fObj = p.opt("file");
+                    if (fObj instanceof JSONObject) {
+                        JSONObject f = (JSONObject) fObj;
+                        String data = f.optString("dataBase64", "");
+                        if (!data.isEmpty()) {
+                            out.attachments.add(new BridgeService.Attachment(
+                                    f.optString("name", "file.bin"),
+                                    f.optString("mimeType", "application/octet-stream"),
+                                    data));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Ollama images[]
+        JSONArray imgs = userMsg.optJSONArray("images");
+        if (imgs != null) {
+            for (int i = 0; i < imgs.length(); i++) {
+                String b64 = imgs.optString(i, "");
+                if (!b64.isEmpty()) {
+                    String clean = b64.startsWith("data:") ? stripDataUrl(b64) : b64;
+                    out.attachments.add(new BridgeService.Attachment(
+                            "image-" + (i + 1) + ".png", "image/png", clean));
+                }
+            }
+        }
+
+        return out;
+    }
+
+    static UserInput extractTopLevelInput(JSONObject req) {
+        UserInput out = new UserInput();
+        out.text = req.optString("prompt", "");
+        JSONArray imgs = req.optJSONArray("images");
+        if (imgs != null) {
+            for (int i = 0; i < imgs.length(); i++) {
+                String b64 = imgs.optString(i, "");
+                if (!b64.isEmpty()) {
+                    String clean = b64.startsWith("data:") ? stripDataUrl(b64) : b64;
+                    out.attachments.add(new BridgeService.Attachment(
+                            "image-" + (i + 1) + ".png", "image/png", clean));
+                }
+            }
+        }
+        return out;
+    }
+
+    static BridgeService.Attachment parseDataUrl(String url, String fallbackBase) {
+        try {
+            int comma = url.indexOf(',');
+            if (comma < 0) return null;
+            String meta = url.substring("data:".length(), comma);
+            String data = url.substring(comma + 1);
+            String mime = "application/octet-stream";
+            boolean isBase64 = false;
+            for (String part : meta.split(";")) {
+                if ("base64".equalsIgnoreCase(part)) isBase64 = true;
+                else if (part.contains("/")) mime = part;
+            }
+            if (!isBase64 || data.isEmpty()) return null;
+            String ext = mime.contains("/")
+                    ? mime.substring(mime.indexOf('/') + 1)
+                    : "bin";
+            return new BridgeService.Attachment(fallbackBase + "." + ext, mime, data);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    static String stripDataUrl(String s) {
+        int comma = s.indexOf(',');
+        return comma < 0 ? s : s.substring(comma + 1);
     }
 
     // =====================================================================
@@ -83,9 +206,7 @@ public class OllamaApiService {
     static void handleRoot(HttpExchange ex) throws IOException {
         setCors(ex);
         if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) { noContent(ex); return; }
-        if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) {
-            methodNotAllowed(ex); return;
-        }
+        if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) { methodNotAllowed(ex); return; }
         byte[] body = "Ollama is running".getBytes(StandardCharsets.UTF_8);
         ex.getResponseHeaders().set("Content-Type", "text/plain; charset=utf-8");
         ex.sendResponseHeaders(200, body.length);
@@ -142,30 +263,27 @@ public class OllamaApiService {
         try { req = new JSONObject(readBody(ex)); }
         catch (Exception e) { writeError(ex, 400, "invalid json"); return; }
 
-        String userText = lastUserMessage(req);
-        if (userText == null || userText.isEmpty()) {
-            writeError(ex, 400, "no user message in 'messages'"); return;
+        UserInput ui = extractUserInput(req);
+        if (!ui.hasContent()) {
+            writeError(ex, 400, "no user content (text or images) in 'messages'");
+            return;
         }
 
         boolean stream = req.optBoolean("stream", true);
-
-        if (stream) {
-            handleChatStream(ex, userText);
-        } else {
-            handleChatNonStream(ex, userText);
-        }
+        if (stream) handleChatStream(ex, ui);
+        else        handleChatNonStream(ex, ui);
     }
 
-    static void handleChatStream(HttpExchange ex, String userText) throws IOException {
+    static void handleChatStream(HttpExchange ex, UserInput ui) throws IOException {
         ex.getResponseHeaders().set("Content-Type", "application/x-ndjson; charset=utf-8");
         ex.getResponseHeaders().set("Cache-Control", "no-cache");
         ex.sendResponseHeaders(200, 0);
         OutputStream os = ex.getResponseBody();
 
-        BridgeService.sendChatStream(userText, new BridgeService.StreamListener() {
+        BridgeService.sendChatStream(ui.text, ui.attachments, new BridgeService.StreamListener() {
             @Override
             public void onChunk(String text, String type) {
-                if (!"RESPONSE".equals(type)) return;   // THINK не отдаём Ollama-клиенту
+                if (!"RESPONSE".equals(type)) return;
                 JSONObject chunk = new JSONObject();
                 chunk.put("model", MODEL_NAME);
                 chunk.put("created_at", nowIso());
@@ -182,9 +300,8 @@ public class OllamaApiService {
             @Override
             public void onDone() {
                 JSONObject done = doneObject("");
-                try {
-                    os.write((done.toString() + "\n").getBytes(StandardCharsets.UTF_8));
-                } catch (Exception ignored) {}
+                try { os.write((done.toString() + "\n").getBytes(StandardCharsets.UTF_8)); }
+                catch (Exception ignored) {}
                 try { os.close(); } catch (Exception ignored) {}
             }
             @Override
@@ -194,8 +311,8 @@ public class OllamaApiService {
         });
     }
 
-    static void handleChatNonStream(HttpExchange ex, String userText) {
-        BridgeService.sendChat(userText).whenComplete((fullText, err) -> {
+    static void handleChatNonStream(HttpExchange ex, UserInput ui) {
+        BridgeService.sendChat(ui.text, ui.attachments).whenComplete((fullText, err) -> {
             try {
                 if (err != null) {
                     writeError(ex, 500, err.getMessage() == null ? "error" : err.getMessage());
@@ -220,8 +337,11 @@ public class OllamaApiService {
         try { req = new JSONObject(readBody(ex)); }
         catch (Exception e) { writeError(ex, 400, "invalid json"); return; }
 
-        String prompt = req.optString("prompt", "");
-        if (prompt.isEmpty()) { writeError(ex, 400, "empty 'prompt'"); return; }
+        UserInput ui = extractTopLevelInput(req);
+        if (!ui.hasContent()) {
+            writeError(ex, 400, "empty 'prompt' and no 'images'");
+            return;
+        }
 
         boolean stream = req.optBoolean("stream", true);
 
@@ -231,7 +351,7 @@ public class OllamaApiService {
             ex.sendResponseHeaders(200, 0);
             OutputStream os = ex.getResponseBody();
 
-            BridgeService.sendChatStream(prompt, new BridgeService.StreamListener() {
+            BridgeService.sendChatStream(ui.text, ui.attachments, new BridgeService.StreamListener() {
                 @Override
                 public void onChunk(String text, String type) {
                     if (!"RESPONSE".equals(type)) return;
@@ -266,7 +386,7 @@ public class OllamaApiService {
                 }
             });
         } else {
-            BridgeService.sendChat(prompt).whenComplete((fullText, err) -> {
+            BridgeService.sendChat(ui.text, ui.attachments).whenComplete((fullText, err) -> {
                 try {
                     if (err != null) {
                         writeError(ex, 500, err.getMessage() == null ? "error" : err.getMessage());
@@ -466,9 +586,9 @@ public class OllamaApiService {
         try { req = new JSONObject(readBody(ex)); }
         catch (Exception e) { writeError(ex, 400, "invalid json"); return; }
 
-        String userText = lastUserMessage(req);
-        if (userText == null || userText.isEmpty()) {
-            writeError(ex, 400, "no user message in 'messages'");
+        UserInput ui = extractUserInput(req);
+        if (!ui.hasContent()) {
+            writeError(ex, 400, "no user content (text or images) in 'messages'");
             return;
         }
 
@@ -476,15 +596,11 @@ public class OllamaApiService {
         if (model == null || model.isEmpty()) model = MODEL_NAME;
 
         boolean stream = req.optBoolean("stream", false);
-
-        if (stream) {
-            v1ChatStream(ex, userText, model);
-        } else {
-            v1ChatNonStream(ex, userText, model);
-        }
+        if (stream) v1ChatStream(ex, ui, model);
+        else        v1ChatNonStream(ex, ui, model);
     }
 
-    static void v1ChatStream(HttpExchange ex, String userText, String model) throws IOException {
+    static void v1ChatStream(HttpExchange ex, UserInput ui, String model) throws IOException {
         ex.getResponseHeaders().set("Content-Type", "text/event-stream; charset=utf-8");
         ex.getResponseHeaders().set("Cache-Control", "no-cache");
         ex.getResponseHeaders().set("Connection", "keep-alive");
@@ -494,10 +610,8 @@ public class OllamaApiService {
 
         final String id = "chatcmpl-" + UUID.randomUUID().toString().replace("-", "").substring(0, 24);
         final long created = Instant.now().getEpochSecond();
-        final boolean[] firstChunk = { true };
         final String modelName = model;
 
-        // начальный чанк с role=assistant (как у OpenAI)
         try {
             JSONObject start = new JSONObject();
             start.put("id", id);
@@ -514,10 +628,9 @@ public class OllamaApiService {
             start.put("choices", new JSONArray().put(choice));
             os.write(("data: " + start.toString() + "\n\n").getBytes(StandardCharsets.UTF_8));
             os.flush();
-            firstChunk[0] = false;
         } catch (Exception ignored) {}
 
-        BridgeService.sendChatStream(userText, new BridgeService.StreamListener() {
+        BridgeService.sendChatStream(ui.text, ui.attachments, new BridgeService.StreamListener() {
             @Override
             public void onChunk(String text, String type) {
                 if (!"RESPONSE".equals(type)) return;
@@ -526,22 +639,18 @@ public class OllamaApiService {
                 chunk.put("object", "chat.completion.chunk");
                 chunk.put("created", created);
                 chunk.put("model", modelName);
-
                 JSONObject delta = new JSONObject();
                 delta.put("content", text);
-
                 JSONObject choice = new JSONObject();
                 choice.put("index", 0);
                 choice.put("delta", delta);
                 choice.put("finish_reason", JSONObject.NULL);
                 chunk.put("choices", new JSONArray().put(choice));
-
                 try {
                     os.write(("data: " + chunk.toString() + "\n\n").getBytes(StandardCharsets.UTF_8));
                     os.flush();
                 } catch (Exception ignored) {}
             }
-
             @Override
             public void onDone() {
                 try {
@@ -561,17 +670,23 @@ public class OllamaApiService {
                 } catch (Exception ignored) {}
                 try { os.close(); } catch (Exception ignored) {}
             }
-
             @Override
             public void onError(String message) {
+                try {
+                    JSONObject err = new JSONObject();
+                    err.put("error", new JSONObject().put("message", message));
+                    os.write(("data: " + err.toString() + "\n\n").getBytes(StandardCharsets.UTF_8));
+                    os.write("data: [DONE]\n\n".getBytes(StandardCharsets.UTF_8));
+                    os.flush();
+                } catch (Exception ignored) {}
                 try { os.close(); } catch (Exception ignored) {}
             }
         });
     }
 
-    static void v1ChatNonStream(HttpExchange ex, String userText, String model) {
+    static void v1ChatNonStream(HttpExchange ex, UserInput ui, String model) {
         final String modelName = (model == null || model.isEmpty()) ? MODEL_NAME : model;
-        BridgeService.sendChat(userText).whenComplete((fullText, err) -> {
+        BridgeService.sendChat(ui.text, ui.attachments).whenComplete((fullText, err) -> {
             try {
                 if (err != null) {
                     writeError(ex, 500, err.getMessage() == null ? "error" : err.getMessage());
@@ -618,8 +733,8 @@ public class OllamaApiService {
         try { req = new JSONObject(readBody(ex)); }
         catch (Exception e) { writeError(ex, 400, "invalid json"); return; }
 
-        String prompt = req.optString("prompt", "");
-        if (prompt.isEmpty()) { writeError(ex, 400, "empty 'prompt'"); return; }
+        UserInput ui = extractTopLevelInput(req);
+        if (!ui.hasContent()) { writeError(ex, 400, "empty 'prompt' and no 'images'"); return; }
 
         String model = req.optString("model", MODEL_NAME);
         if (model == null || model.isEmpty()) model = MODEL_NAME;
@@ -628,9 +743,9 @@ public class OllamaApiService {
         final String modelName = model;
 
         if (stream) {
-            v1CompletionStream(ex, prompt, modelName);
+            v1CompletionStream(ex, ui, modelName);
         } else {
-            BridgeService.sendChat(prompt).whenComplete((fullText, err) -> {
+            BridgeService.sendChat(ui.text, ui.attachments).whenComplete((fullText, err) -> {
                 try {
                     if (err != null) {
                         writeError(ex, 500, err.getMessage() == null ? "error" : err.getMessage());
@@ -667,7 +782,7 @@ public class OllamaApiService {
         }
     }
 
-    static void v1CompletionStream(HttpExchange ex, String prompt, String model) throws IOException {
+    static void v1CompletionStream(HttpExchange ex, UserInput ui, String model) throws IOException {
         ex.getResponseHeaders().set("Content-Type", "text/event-stream; charset=utf-8");
         ex.getResponseHeaders().set("Cache-Control", "no-cache");
         ex.getResponseHeaders().set("Connection", "keep-alive");
@@ -679,7 +794,7 @@ public class OllamaApiService {
         final long created = Instant.now().getEpochSecond();
         final String modelName = model;
 
-        BridgeService.sendChatStream(prompt, new BridgeService.StreamListener() {
+        BridgeService.sendChatStream(ui.text, ui.attachments, new BridgeService.StreamListener() {
             @Override
             public void onChunk(String text, String type) {
                 if (!"RESPONSE".equals(type)) return;
@@ -765,18 +880,6 @@ public class OllamaApiService {
     // =====================================================================
     //  HELPERS
     // =====================================================================
-
-    static String lastUserMessage(JSONObject req) {
-        if (!req.has("messages")) return null;
-        JSONArray msgs = req.getJSONArray("messages");
-        for (int i = msgs.length() - 1; i >= 0; i--) {
-            JSONObject m = msgs.getJSONObject(i);
-            if ("user".equals(m.optString("role"))) {
-                return m.optString("content", "");
-            }
-        }
-        return null;
-    }
 
     static JSONObject doneObject(String content) {
         JSONObject o = new JSONObject();

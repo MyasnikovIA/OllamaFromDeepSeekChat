@@ -21,6 +21,7 @@ import java.util.concurrent.TimeUnit;
  *   "/think off"      → выключить режим размышления
  *   "/search on"      → включить умный поиск
  *   "/search off"     → выключить умный поиск
+ *   "/file <path> [text]"  → отправить файл (можно с текстом)
  *   "/tabs"           → список открытых вкладок DeepSeek
  *   "/tab <n|id>"     → выбрать вкладку по номеру или tabId (можно префикс)
  *   "/state"          → показать режимы активной вкладки
@@ -87,17 +88,18 @@ public class Main {
         System.out.println("[SERVER] Bridge log : http://localhost:" + PORT + "/log");
         System.out.println("[SERVER] Tabs list  : http://localhost:" + PORT + "/tabs");
         System.out.println();
-        System.out.println("  <текст>          → sendToDeepSeek(text)");
-        System.out.println("  ! <js>           → eval в консоли страницы");
-        System.out.println("  /new             → создать новый чат");
-        System.out.println("  /think on        → включить режим размышления");
-        System.out.println("  /think off       → выключить режим размышления");
-        System.out.println("  /search on       → включить умный поиск");
-        System.out.println("  /search off      → выключить умный поиск");
-        System.out.println("  /tabs            → список открытых вкладок DeepSeek");
-        System.out.println("  /tab <n|id>      → выбрать вкладку (#n или tabId/префикс)");
-        System.out.println("  /state           → показать режимы активной вкладки");
-        System.out.println("  /help            → эта подсказка");
+        System.out.println("  <текст>              → sendToDeepSeek(text)");
+        System.out.println("  ! <js>               → eval в консоли страницы");
+        System.out.println("  /new                 → создать новый чат");
+        System.out.println("  /think on            → включить режим размышления");
+        System.out.println("  /think off           → выключить режим размышления");
+        System.out.println("  /search on           → включить умный поиск");
+        System.out.println("  /search off          → выключить умный поиск");
+        System.out.println("  /file <path> [text]  → отправить файл в DeepSeek (с текстом)");
+        System.out.println("  /tabs                → список открытых вкладок DeepSeek");
+        System.out.println("  /tab <n|id>          → выбрать вкладку (#n или tabId/префикс)");
+        System.out.println("  /state               → показать режимы активной вкладки");
+        System.out.println("  /help                → эта подсказка");
         System.out.println("========================================================");
         System.out.print("> ");
         System.out.flush();
@@ -136,7 +138,47 @@ public class Main {
             return;
         }
 
-        // НОВОЕ: вкладки и состояние
+        // ---------- /file <path> [text] ----------
+        if (trimmed.startsWith("/file ")) {
+            String rest = trimmed.substring("/file ".length()).trim();
+            if (rest.isEmpty()) {
+                System.out.println("[FILE] usage: /file <path> [text]");
+                System.out.print("> ");
+                System.out.flush();
+                return;
+            }
+            String path;
+            String text = "";
+            if (rest.startsWith("\"")) {
+                int end = rest.indexOf('"', 1);
+                if (end > 0) {
+                    path = rest.substring(1, end);
+                    text = rest.substring(end + 1).trim();
+                } else {
+                    path = rest.substring(1);
+                }
+            } else if (rest.startsWith("'")) {
+                int end = rest.indexOf('\'', 1);
+                if (end > 0) {
+                    path = rest.substring(1, end);
+                    text = rest.substring(end + 1).trim();
+                } else {
+                    path = rest.substring(1);
+                }
+            } else {
+                int sp = rest.indexOf(' ');
+                if (sp < 0) {
+                    path = rest;
+                } else {
+                    path = rest.substring(0, sp);
+                    text = rest.substring(sp + 1).trim();
+                }
+            }
+            BridgeService.sendFileFromStdin(path, text);
+            return;
+        }
+
+        // ---------- вкладки ----------
         if (trimmed.equals("/tabs")) {
             BridgeService.printTabs();
             return;

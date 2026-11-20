@@ -5,12 +5,15 @@ import com.sun.net.httpserver.HttpServer;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
@@ -28,23 +31,26 @@ import java.util.concurrent.TimeUnit;
  *   GET  /tabs            : список активных вкладок (JSON)
  *
  * Публичный API:
- *   - sendFromStdin(text)               — sendToDeepSeek
- *   - sendEvalFromStdin(code)           — eval
- *   - sendNewChatFromStdin()            — новый чат
- *   - sendEnableThinkingFromStdin()     — включить режим размышления
- *   - sendDisableThinkingFromStdin()    — выключить режим размышления
- *   - sendEnableSmartSearchFromStdin()  — включить умный поиск
- *   - sendDisableSmartSearchFromStdin() — выключить умный поиск
- *   - printTabs()                       — список вкладок
- *   - printState()                      — состояние активной вкладки
- *   - selectTabByIndex(int)             — выбрать вкладку по номеру
- *   - selectTabById(String)             — выбрать вкладку по tabId
- *   - sendChat(text)                    — CompletableFuture<String>
- *   - sendChatStream(text, listener)    — стрим в слушатель
+ *   - sendFromStdin(text)                          — sendToDeepSeek
+ *   - sendEvalFromStdin(code)                      — eval
+ *   - sendNewChatFromStdin()                       — новый чат
+ *   - sendEnableThinkingFromStdin()                — включить режим размышления
+ *   - sendDisableThinkingFromStdin()               — выключить режим размышления
+ *   - sendEnableSmartSearchFromStdin()             — включить умный поиск
+ *   - sendDisableSmartSearchFromStdin()            — выключить умный поиск
+ *   - sendFileFromStdin(path, text)                — отправить файл
+ *   - printTabs() / printState()
+ *   - selectTabByIndex/Id/Prefix
+ *   - sendChat(text) / sendChat(text, attachments)
+ *   - sendChatStream(text, listener) / sendChatStream(text, attachments, listener)
  */
 public class BridgeService {
 
     static final long WATCHDOG_TIMEOUT_MS = 120_000;
+
+    // Лимиты на файлы (в байтах бинарных данных до base64)
+    public static final long MAX_FILE_BYTES  = 20L * 1024 * 1024;
+    public static final long MAX_TOTAL_BYTES = 50L * 1024 * 1024;
 
     static final List<Client> clients = new ArrayList<>();
     static final BlockingQueue<PendingCommand> commandQueue = new LinkedBlockingQueue<>();
@@ -57,13 +63,24 @@ public class BridgeService {
     static volatile boolean awaitingResponse    = false;
     static volatile long    lastActivityAt      = System.currentTimeMillis();
 
-    // НОВОЕ: какая вкладка обслуживает текущую команду и какая выбрана вручную
     static volatile String activeServingTabId = null;
     static volatile String selectedTabId      = null;
 
     static final Object streamLock = new Object();
     static final Set<String> rejectedStreams =
             Collections.newSetFromMap(new ConcurrentHashMap<>());
+
+    // ---------- вложение ----------
+    public static class Attachment {
+        public final String name;
+        public final String mimeType;
+        public final String dataBase64;   // чистый base64 без data: префикса
+        public Attachment(String name, String mimeType, String dataBase64) {
+            this.name = name;
+            this.mimeType = mimeType;
+            this.dataBase64 = dataBase64;
+        }
+    }
 
     public interface StreamListener {
         void onChunk(String text, String type);
@@ -72,16 +89,16 @@ public class BridgeService {
     }
 
     static class Client {
-        final String tabId;                                    // НОВОЕ
+        final String tabId;
         final BlockingQueue<String> queue = new LinkedBlockingQueue<>();
         final long connectedAt = System.currentTimeMillis();
         volatile boolean active = true;
-        volatile boolean thinking       = false;               // НОВОЕ
-        volatile boolean smartSearch    = false;               // НОВОЕ
-        volatile boolean tokenExhausted = false;               // НОВОЕ
-        volatile boolean modesReported  = false;               // НОВОЕ
-        volatile String  info           = "";                  // НОВОЕ
-        Client(String tabId) { this.tabId = tabId; }           // НОВОЕ
+        volatile boolean thinking       = false;
+        volatile boolean smartSearch    = false;
+        volatile boolean tokenExhausted = false;
+        volatile boolean modesReported  = false;
+        volatile String  info           = "";
+        Client(String tabId) { this.tabId = tabId; }
     }
 
     static class PendingCommand {
@@ -97,7 +114,7 @@ public class BridgeService {
     public static void register(HttpServer server) {
         server.createContext("/events", BridgeService::handleEvents);
         server.createContext("/log",    BridgeService::handleLog);
-        server.createContext("/tabs",   BridgeService::handleTabs);   // НОВОЕ
+        server.createContext("/tabs",   BridgeService::handleTabs);
     }
 
     // ---------- публичный API ----------
@@ -145,10 +162,86 @@ public class BridgeService {
         enqueue(new PendingCommand(cmd.toString(), null, true, true));
     }
 
+    // ---------- отправка файла со stdin ----------
+    public static void sendFileFromStdin(String path, String text) {
+        File f = new File(path);
+        if (!f.isFile()) {
+            System.out.println();
+            System.out.println("[!] file not found: " + path);
+            System.out.print("> ");
+            System.out.flush();
+            return;
+        }
+        if (f.length() > MAX_FILE_BYTES) {
+            System.out.println();
+            System.out.println("[!] file too large: " + f.length()
+                    + " bytes (max " + MAX_FILE_BYTES + ")");
+            System.out.print("> ");
+            System.out.flush();
+            return;
+        }
+        try {
+            byte[] bytes = Files.readAllBytes(f.toPath());
+            String b64 = Base64.getEncoder().encodeToString(bytes);
+            String mime = Files.probeContentType(f.toPath());
+            if (mime == null) mime = guessMimeByName(f.getName());
+
+            JSONObject cmd = new JSONObject();
+            cmd.put("type", "send");
+            cmd.put("text", text == null ? "" : text);
+            JSONArray arr = new JSONArray();
+            JSONObject o = new JSONObject();
+            o.put("name", f.getName());
+            o.put("mimeType", mime);
+            o.put("dataBase64", b64);
+            arr.put(o);
+            cmd.put("files", arr);
+
+            System.out.println();
+            System.out.println("[FILE] " + f.getName()
+                    + " (" + bytes.length + " bytes, " + mime + ")"
+                    + (text != null && !text.isEmpty() ? " → " + text : ""));
+            System.out.print("> ");
+            System.out.flush();
+
+            enqueue(new PendingCommand(cmd.toString(), null, true, true));
+        } catch (Exception e) {
+            System.out.println();
+            System.out.println("[!] file read error: " + e.getMessage());
+            System.out.print("> ");
+            System.out.flush();
+        }
+    }
+
+    static String guessMimeByName(String name) {
+        String n = name == null ? "" : name.toLowerCase();
+        if (n.endsWith(".png"))  return "image/png";
+        if (n.endsWith(".jpg") || n.endsWith(".jpeg")) return "image/jpeg";
+        if (n.endsWith(".gif"))  return "image/gif";
+        if (n.endsWith(".webp")) return "image/webp";
+        if (n.endsWith(".bmp"))  return "image/bmp";
+        if (n.endsWith(".pdf"))  return "application/pdf";
+        if (n.endsWith(".txt"))  return "text/plain";
+        if (n.endsWith(".md"))   return "text/markdown";
+        if (n.endsWith(".json")) return "application/json";
+        if (n.endsWith(".csv"))  return "text/csv";
+        if (n.endsWith(".html") || n.endsWith(".htm")) return "text/html";
+        if (n.endsWith(".doc"))  return "application/msword";
+        if (n.endsWith(".docx")) return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+        if (n.endsWith(".xls"))  return "application/vnd.ms-excel";
+        if (n.endsWith(".xlsx")) return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+        if (n.endsWith(".zip"))  return "application/zip";
+        return "application/octet-stream";
+    }
+
     public static CompletableFuture<String> sendChat(String text) {
+        return sendChat(text, null);
+    }
+
+    public static CompletableFuture<String> sendChat(String text, List<Attachment> attachments) {
         CompletableFuture<String> future = new CompletableFuture<>();
         StringBuilder buf = new StringBuilder();
-        sendChatStream(text, new StreamListener() {
+        sendChatStream(text, attachments, new StreamListener() {
             public void onChunk(String t, String type) {
                 if ("RESPONSE".equals(type)) buf.append(t);
             }
@@ -159,13 +252,59 @@ public class BridgeService {
     }
 
     public static void sendChatStream(String text, StreamListener listener) {
+        sendChatStream(text, null, listener);
+    }
+
+    public static void sendChatStream(String text, List<Attachment> attachments, StreamListener listener) {
+        // Проверка суммарного размера
+        long totalB64 = 0;
+        if (attachments != null) {
+            for (Attachment a : attachments) {
+                long bin = a.dataBase64 == null ? 0 : (a.dataBase64.length() * 3L) / 4L;
+                if (bin > MAX_FILE_BYTES) {
+                    if (listener != null) {
+                        listener.onError("file too large: " + a.name
+                                + " (" + bin + " > " + MAX_FILE_BYTES + ")");
+                    } else {
+                        System.out.println();
+                        System.out.println("[!] file too large: " + a.name);
+                        System.out.print("> "); System.out.flush();
+                    }
+                    return;
+                }
+                totalB64 += a.dataBase64 == null ? 0 : a.dataBase64.length();
+            }
+            long totalBin = (totalB64 * 3L) / 4L;
+            if (totalBin > MAX_TOTAL_BYTES) {
+                if (listener != null) {
+                    listener.onError("attachments total size exceeds " + MAX_TOTAL_BYTES);
+                } else {
+                    System.out.println();
+                    System.out.println("[!] attachments total too large");
+                    System.out.print("> "); System.out.flush();
+                }
+                return;
+            }
+        }
+
         JSONObject cmd = new JSONObject();
         cmd.put("type", "send");
-        cmd.put("text", text);
+        cmd.put("text", text == null ? "" : text);
+        if (attachments != null && !attachments.isEmpty()) {
+            JSONArray arr = new JSONArray();
+            for (Attachment a : attachments) {
+                JSONObject o = new JSONObject();
+                o.put("name", a.name == null ? "file" : a.name);
+                o.put("mimeType", a.mimeType == null ? "application/octet-stream" : a.mimeType);
+                o.put("dataBase64", a.dataBase64 == null ? "" : a.dataBase64);
+                arr.put(o);
+            }
+            cmd.put("files", arr);
+        }
         enqueue(new PendingCommand(cmd.toString(), listener, false, true));
     }
 
-    // ---------- НОВОЕ: утилиты для /tabs /tab /state ----------
+    // ---------- утилиты ----------
     public static synchronized void printTabs() {
         List<Client> active = new ArrayList<>();
         synchronized (clients) {
@@ -255,23 +394,21 @@ public class BridgeService {
         activeListener = cmd.listener;
         activeFromStdin = cmd.fromStdin;
         activeIsChatCommand = cmd.isChatCommand;
-        activeServingTabId = c.tabId;              // НОВОЕ
+        activeServingTabId = c.tabId;
         lastActivityAt = System.currentTimeMillis();
         c.queue.offer(cmd.json);
     }
 
     static Client pickActiveClient() {
         synchronized (clients) {
-            // 1) явный выбор, если вкладка жива и не исчерпана
             if (selectedTabId != null) {
                 for (Client c : clients) {
                     if (c.active && c.tabId.equals(selectedTabId) && !c.tokenExhausted) {
                         return c;
                     }
                 }
-                selectedTabId = null; // выбор устарел
+                selectedTabId = null;
             }
-            // 2) первая попавшаяся не исчерпанная
             for (Client c : clients) {
                 if (c.active && !c.tokenExhausted) return c;
             }
@@ -287,7 +424,7 @@ public class BridgeService {
             awaitingResponse = false;
             activeFromStdin = false;
             activeIsChatCommand = false;
-            activeServingTabId = null;             // НОВОЕ
+            activeServingTabId = null;
             if (l != null) {
                 try { l.onError("watchdog timeout"); } catch (Exception ignored) {}
             }
@@ -301,7 +438,7 @@ public class BridgeService {
         ex.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type");
     }
 
-    static String queryParam(String query, String key) {   // НОВОЕ
+    static String queryParam(String query, String key) {
         if (query == null) return null;
         for (String pair : query.split("&")) {
             int eq = pair.indexOf('=');
@@ -317,7 +454,7 @@ public class BridgeService {
         return null;
     }
 
-    static Client findClient(String tabId) {                // НОВОЕ
+    static Client findClient(String tabId) {
         if (tabId == null || tabId.isEmpty()) return null;
         synchronized (clients) {
             for (Client c : clients) {
@@ -334,7 +471,6 @@ public class BridgeService {
             ex.sendResponseHeaders(405, -1); ex.close(); return;
         }
 
-        // НОВОЕ: tabId из query
         String tabId = queryParam(ex.getRequestURI().getQuery(), "tabId");
         if (tabId == null || tabId.isEmpty()) {
             tabId = "anon-" + System.nanoTime();
@@ -346,7 +482,7 @@ public class BridgeService {
         ex.sendResponseHeaders(200, 0);
 
         OutputStream os = ex.getResponseBody();
-        Client client = new Client(tabId);              // ИЗМЕНЕНО
+        Client client = new Client(tabId);
         synchronized (clients) { clients.add(client); }
 
         trySendNext();
@@ -394,7 +530,7 @@ public class BridgeService {
             String text   = json.optString("text", "");
             String sid    = json.optString("streamId", "");
             String sType  = json.optString("streamType", "RESPONSE");
-            String tabId  = json.optString("tabId", "");        // НОВОЕ
+            String tabId  = json.optString("tabId", "");
             lastActivityAt = System.currentTimeMillis();
 
             switch (level) {
@@ -402,12 +538,12 @@ public class BridgeService {
                 case "stream-done": handleStreamDone(sid); break;
                 case "result":      handleResult(text); break;
                 case "error":       handleError(text); break;
-                // НОВОЕ
                 case "hello":       handleHello(tabId, text); break;
                 case "mode-state":  handleModeState(tabId, text); break;
                 case "token-limit": handleTokenLimit(tabId, text); break;
             }
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            System.err.println("[log] " + e.getMessage());
         }
 
         byte[] ok = "{\"ok\":true}".getBytes(StandardCharsets.UTF_8);
@@ -417,7 +553,6 @@ public class BridgeService {
         ex.close();
     }
 
-    // ---------- НОВОЕ: обработчики новых уровней ----------
     static void handleHello(String tabId, String info) {
         Client c = findClient(tabId);
         if (c == null) return;
@@ -461,7 +596,6 @@ public class BridgeService {
         boolean wasFirstTime = !c.tokenExhausted;
         c.tokenExhausted = true;
 
-        // если именно эта вкладка обслуживает текущую команду — абортим её
         boolean wasServing = tabId.equals(activeServingTabId) && awaitingResponse;
         StreamListener l = null;
         boolean wasStdin = false;
@@ -507,7 +641,6 @@ public class BridgeService {
         return tabId.length() > 12 ? tabId.substring(0, 12) + "…" : tabId;
     }
 
-    // ---------- существующие обработчики стрима ----------
     static void handleStreamChunk(String sid, String text, String sType) {
         if (sid.isEmpty()) return;
         synchronized (streamLock) {
@@ -550,7 +683,7 @@ public class BridgeService {
                 if (wasActive && activeStreamType != null) System.out.println();
                 activeStreamId = null;
                 activeStreamType = null;
-                activeServingTabId = null;             // НОВОЕ
+                activeServingTabId = null;
                 l = activeListener;
                 wasStdin = activeFromStdin;
                 activeListener = null;
@@ -581,7 +714,7 @@ public class BridgeService {
         awaitingResponse = false;
         activeFromStdin = false;
         activeIsChatCommand = false;
-        activeServingTabId = null;                     // НОВОЕ
+        activeServingTabId = null;
 
         if (l != null) {
             try { l.onError(text); } catch (Exception ignored) {}
@@ -602,7 +735,7 @@ public class BridgeService {
         awaitingResponse = false;
         activeFromStdin = false;
         activeIsChatCommand = false;
-        activeServingTabId = null;                     // НОВОЕ
+        activeServingTabId = null;
 
         if (l != null) {
             try { l.onError(text); } catch (Exception ignored) {}
@@ -615,7 +748,7 @@ public class BridgeService {
         trySendNext();
     }
 
-    // ---------- НОВОЕ: GET /tabs ----------
+    // ---------- GET /tabs ----------
     static void handleTabs(HttpExchange ex) throws IOException {
         setCors(ex);
         if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) {
