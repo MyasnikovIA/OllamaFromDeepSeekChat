@@ -21,11 +21,13 @@ import java.util.concurrent.TimeUnit;
  *   "/think off"      → выключить режим размышления
  *   "/search on"      → включить умный поиск
  *   "/search off"     → выключить умный поиск
+ *   "/tabs"           → список открытых вкладок DeepSeek
+ *   "/tab <n|id>"     → выбрать вкладку по номеру или tabId (можно префикс)
+ *   "/state"          → показать режимы активной вкладки
  *   "/help"           → подсказка
  */
 public class Main {
 
-    // ИЗМЕНЕНО: Порт 11434 (стандартный порт Ollama)
     public static final int PORT = 11434;
 
     public static void main(String[] args) throws Exception {
@@ -52,7 +54,6 @@ public class Main {
         ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
         sched.scheduleAtFixedRate(BridgeService::watchdogTick, 10, 10, TimeUnit.SECONDS);
 
-        // ИЗМЕНЕНО: Запуск браузера после старта сервера
         if (!noBrowser && !"true".equals(System.getProperty("ds.no.browser"))) {
             ChromeLauncher.openDeepSeek();
         }
@@ -82,8 +83,9 @@ public class Main {
         System.out.println("========================================================");
         System.out.println("[SERVER] listening on port " + PORT);
         System.out.println("[SERVER] Ollama API : http://localhost:" + PORT + "/api/tags");
-        System.out.println("[SERVER] Bridge SSE : http://localhost:" + PORT + "/events");
+        System.out.println("[SERVER] Bridge SSE : http://localhost:" + PORT + "/events?tabId=...");
         System.out.println("[SERVER] Bridge log : http://localhost:" + PORT + "/log");
+        System.out.println("[SERVER] Tabs list  : http://localhost:" + PORT + "/tabs");
         System.out.println();
         System.out.println("  <текст>          → sendToDeepSeek(text)");
         System.out.println("  ! <js>           → eval в консоли страницы");
@@ -92,6 +94,9 @@ public class Main {
         System.out.println("  /think off       → выключить режим размышления");
         System.out.println("  /search on       → включить умный поиск");
         System.out.println("  /search off      → выключить умный поиск");
+        System.out.println("  /tabs            → список открытых вкладок DeepSeek");
+        System.out.println("  /tab <n|id>      → выбрать вкладку (#n или tabId/префикс)");
+        System.out.println("  /state           → показать режимы активной вкладки");
         System.out.println("  /help            → эта подсказка");
         System.out.println("========================================================");
         System.out.print("> ");
@@ -121,7 +126,6 @@ public class Main {
             return;
         }
 
-        // НОВОЕ: умный поиск
         if (trimmed.equals("/search on") || trimmed.equals("/search")) {
             BridgeService.sendEnableSmartSearchFromStdin();
             return;
@@ -129,6 +133,40 @@ public class Main {
 
         if (trimmed.equals("/search off")) {
             BridgeService.sendDisableSmartSearchFromStdin();
+            return;
+        }
+
+        // НОВОЕ: вкладки и состояние
+        if (trimmed.equals("/tabs")) {
+            BridgeService.printTabs();
+            return;
+        }
+
+        if (trimmed.equals("/state")) {
+            BridgeService.printState();
+            return;
+        }
+
+        if (trimmed.startsWith("/tab ")) {
+            String arg = trimmed.substring("/tab ".length()).trim();
+            if (arg.isEmpty()) {
+                System.out.println("[TAB] usage: /tab <n|id>");
+                System.out.print("> ");
+                System.out.flush();
+                return;
+            }
+            boolean ok;
+            try {
+                int idx = Integer.parseInt(arg);
+                ok = BridgeService.selectTabByIndex(idx);
+            } catch (NumberFormatException e) {
+                ok = BridgeService.selectTabById(arg)
+                        || BridgeService.selectTabByPrefix(arg);
+            }
+            if (!ok) {
+                System.out.println("[TAB] not found: " + arg);
+            }
+            BridgeService.printTabs();
             return;
         }
 

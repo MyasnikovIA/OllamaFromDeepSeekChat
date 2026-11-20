@@ -8,6 +8,14 @@
   const EVT_READY  = "__ds_injected_ready__";
   const TAG        = "[DS-INTERCEPT]";
 
+  const TAB_ID = "tab-" + (
+      (typeof crypto !== "undefined" && crypto.randomUUID)
+          ? crypto.randomUUID()
+          : (Date.now() + "-" + Math.random().toString(36).slice(2, 10))
+  );
+  const EVT_MODE_STATE  = "__ds_mode_state__";
+  const EVT_TOKEN_LIMIT = "__ds_token_limit__";
+
   // ИЗМЕНЕНО: Порт 11434
   const SERVER     = "http://127.0.0.1:11434";
 
@@ -15,7 +23,7 @@
 
   let postQueue = Promise.resolve();
   function postLog(level, text, streamId, streamType) {
-    const payload = { level, text };
+    const payload = { level, text, tabId: TAB_ID };   // НОВОЕ: tabId
     if (streamId) payload.streamId = streamId;
     if (streamType) payload.streamType = streamType;
     const body = JSON.stringify(payload);
@@ -163,6 +171,18 @@
     postLog(ok ? "result" : "error", text);
   });
 
+  window.addEventListener(EVT_MODE_STATE, (evt) => {
+    const { thinking = false, smartSearch = false } = evt.detail || {};
+    postLog("mode-state", JSON.stringify({
+      thinking: !!thinking, smartSearch: !!smartSearch
+    }));
+  });
+  window.addEventListener(EVT_TOKEN_LIMIT, (evt) => {
+    const { resetOn = "" } = evt.detail || {};
+    console.warn(`${TAG} token limit detected, reset:`, resetOn);
+    postLog("token-limit", resetOn);
+  });
+
   let ready = false;
   const pendingCmds = [];
 
@@ -183,6 +203,14 @@
   let es = null;
   let reconnectTimer = null;
 
+  function registerTab() {
+    postLog("hello", JSON.stringify({
+      url: location.href,
+      ua: navigator.userAgent
+    }));
+    // попросить injected.js отдать текущие режимы
+    dispatchToMain({ type: "getState" });
+  }
   function scheduleReconnect() {
     if (reconnectTimer) return;
     reconnectTimer = setTimeout(() => {
@@ -198,13 +226,18 @@
     }
 
     try {
-      es = new EventSource(SERVER + "/events");
+      // ИЗМЕНЕНО: добавляем tabId
+      es = new EventSource(SERVER + "/events?tabId=" + encodeURIComponent(TAB_ID));
     } catch (_) {
       scheduleReconnect();
       return;
     }
 
-    es.onopen = () => console.info(`${TAG} EventSource connected`);
+    // ИЗМЕНЕНО: на onopen регистрируем вкладку и запрашиваем состояние
+    es.onopen = () => {
+      console.info(`${TAG} EventSource connected, tabId=${TAB_ID}`);
+      registerTab();
+    };
 
     es.onerror = () => {
       try { es.close(); } catch (_) {}
@@ -220,7 +253,8 @@
     };
   }
 
+
   connectSSE();
 
-  console.info(`${TAG} listener installed`);
+  console.info(`${TAG} listener installed, tabId=${TAB_ID}`);
 })();
