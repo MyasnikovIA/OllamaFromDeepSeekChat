@@ -11,10 +11,26 @@
   const EVT_RESULT   = "__ds_eval_result__";
   const EVT_READY    = "__ds_injected_ready__";
 
+  // --- НОВОЕ: константы для связи с Java-сервером ---
+  const SERVER_URL = "http://localhost:11434";
+  const urlParams = new URLSearchParams(window.location.search);
+  const tabId = urlParams.get('tabId') || 'tab-' + Math.random().toString(36).substring(2, 10);
+
   let __streamSeq = 0;
   const nextStreamId = () =>
       "s" + Date.now() + "-" + (++__streamSeq) + "-" +
       Math.random().toString(36).slice(2, 8);
+
+  // --- НОВОЕ: отправка данных на Java-сервер (логи, стримы) ---
+  const postLog = (level, text, streamId = "", streamType = "") => {
+    try {
+      fetch(SERVER_URL + "/log", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ level, text, streamId, streamType, tabId })
+      }).catch(() => {});
+    } catch (_) {}
+  };
 
   const emit = (chunk, phase = "chunk", streamId = "") => {
     try {
@@ -61,6 +77,8 @@
         const skip = SKIP_PREFIXES.some((p) => text.startsWith(p));
         if (!skip) {
           try { emitConsole(level, text); } catch (_) {}
+          // НОВОЕ: дублируем консоль на Java-сервер
+          if (level === "error") postLog("console-error", text);
         }
       }
       return orig(...args);
@@ -92,7 +110,7 @@
 
     (async () => {
       const reader = cloned.body && cloned.body.getReader();
-      if (!reader) { emit("", "done", streamId); return; }
+      if (!reader) { emit("", "done", streamId); postLog("stream-done", "", streamId); return; }
       const decoder = new TextDecoder("utf-8");
       let buffer = "";
       try {
@@ -105,19 +123,26 @@
             const event = buffer.slice(0, idx);
             buffer = buffer.slice(idx + 2);
             for (const line of event.split("\n")) {
-              if (line.startsWith("data:")) emit(line, "sse", streamId);
+              if (line.startsWith("data:")) {
+                emit(line, "sse", streamId);
+                postLog("stream", line, streamId, "RESPONSE"); // НОВОЕ: отправка стрима в Java
+              }
             }
           }
         }
         if (buffer.trim()) {
           for (const line of buffer.split("\n")) {
-            if (line.startsWith("data:")) emit(line, "sse", streamId);
+            if (line.startsWith("data:")) {
+              emit(line, "sse", streamId);
+              postLog("stream", line, streamId, "RESPONSE");
+            }
           }
         }
       } catch (err) {
         console.warn("[DS-INTERCEPT] stream error:", err);
       } finally {
         emit("", "done", streamId);
+        postLog("stream-done", "", streamId); // НОВОЕ: конец стрима в Java
       }
     })();
 
@@ -149,12 +174,18 @@
       const fresh = text.slice(offset);
       offset = text.length;
       for (const line of fresh.split("\n")) {
-        if (line.startsWith("data:")) emit(line, "sse", streamId);
+        if (line.startsWith("data:")) {
+          emit(line, "sse", streamId);
+          postLog("stream", line, streamId, "RESPONSE"); // НОВОЕ: отправка XHR-стрима в Java
+        }
       }
     });
 
     xhr.addEventListener("loadend", () => {
-      if (target && streamId) emit("", "done", streamId);
+      if (target && streamId) {
+        emit("", "done", streamId);
+        postLog("stream-done", "", streamId); // НОВОЕ
+      }
     });
 
     return xhr;
@@ -162,7 +193,7 @@
   PatchedXHR.prototype = OrigXHR.prototype;
   window.XMLHttpRequest = PatchedXHR;
 
-  // ---------- общий helper: клик мышью с координатами ----------
+  // ---------- helpers ----------
   function clickWithMouse(el) {
     if (!el) throw new Error("element is null");
     el.scrollIntoView({ block: "center", inline: "center" });
@@ -190,7 +221,6 @@
     return null;
   }
 
-  // ---------- НОВОЕ: загрузка файлов в DeepSeek ----------
   function base64ToBlob(b64, mime) {
     const bin = atob(b64 || "");
     const len = bin.length;
@@ -199,87 +229,157 @@
     return new Blob([bytes], { type: mime || "application/octet-stream" });
   }
 
+  // ---------- НОВОЕ: определение текстовых файлов и декодирование ----------
+  const TEXT_EXT_RE = /\.(txt|text|md|markdown|json|jsonl|csv|tsv|html?|xml|ya?ml|log|ini|conf|cfg|toml|properties|js|jsx|ts|tsx|py|java|kt|c|cc|cpp|cxx|h|hpp|cs|go|rs|rb|php|pl|lua|swift|m|mm|scala|clj|ex|exs|erl|hs|r|sql|sh|bash|zsh|bat|cmd|ps1|tex|rtf|env)$/i;
+  const TEXT_MIME_RE = /^(text\/|application\/(json|xml|x-yaml|yaml|javascript|typescript|sql|x-sh|x-shellscript|x-httpd-php))/i;
+
+  function isTextFile(f) {
+    const name = (f && f.name) || "";
+    const mime = (f && f.mimeType) || "";
+    if (TEXT_EXT_RE.test(name)) return true;
+    if (TEXT_MIME_RE.test(mime)) return true;
+    return false;
+  }
+
+  function decodeBase64ToText(b64) {
+    const bin = atob(b64 || "");
+    const len = bin.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  }
+
+  // ---------- загрузка бинарных файлов ----------
   async function uploadFilesToInput(files) {
     if (!files || files.length === 0) return true;
 
-    // Ждём появления скрытого input[type=file] на странице
-    let input = await waitForElement('input[type="file"]', 8000);
+    console.log("[Upload] attempt: files =", files.map(f => f.name).join(", "));
+
+    let input = document.querySelector('input[type="file"]');
     if (!input) {
-      // Иногда input создаётся динамически только при клике на «прикрепить».
-      // Пробуем кликнуть по кнопке-скрепке, чтобы создать/активировать input.
-      for (const el of document.querySelectorAll('[role="button"], button')) {
-        const label = (el.getAttribute("aria-label") || el.getAttribute("title") || "").toLowerCase();
-        if (label.includes("attach") || label.includes("файл") || label.includes("upload")) {
+      input = await waitForElement('input[type="file"]', 5000);
+    }
+    if (!input) {
+      const candidates = document.querySelectorAll('[role="button"], button');
+      for (const el of candidates) {
+        const label = (
+            (el.getAttribute("aria-label") || "") + " " +
+            (el.getAttribute("title") || "") + " " +
+            (el.textContent || "")
+        ).toLowerCase();
+        if (/attach|файл|upload|прикреп|file/i.test(label)) {
           try { clickWithMouse(el); } catch (_) {}
-          await sleep(200);
+          await sleep(400);
           input = document.querySelector('input[type="file"]');
           if (input) break;
         }
       }
     }
     if (!input) {
-      throw new Error("[DS] input[type=file] не найден на странице");
+      throw new Error("[Upload] input[type=file] не найден на странице");
     }
 
+    console.log("[Upload] found input, multiple =", input.multiple);
+
     if (files.length > 1 && !input.multiple) {
-      input.multiple = true;
+      try { input.multiple = true; } catch (_) {}
     }
 
     const dt = new DataTransfer();
     for (const f of files) {
       const blob = base64ToBlob(f.dataBase64, f.mimeType);
-      const fileName = f.name || ("file-" + Date.now());
+      const fileName = (f.name || ("file-" + Date.now())).replace(/[\r\n]/g, "_");
       const file = new File([blob], fileName, {
-        type: f.mimeType || "application/octet-stream"
+        type: f.mimeType || "application/octet-stream",
+        lastModified: Date.now()
       });
       dt.items.add(file);
+      console.log("[Upload] prepared:", fileName, "size:", blob.size, "type:", file.type);
     }
 
+    let assigned = false;
     try {
       input.files = dt.files;
-    } catch (_) {
-      Object.defineProperty(input, "files", {
-        configurable: true,
-        get: () => dt.files
-      });
+      assigned = !!(input.files && input.files.length === files.length);
+      console.log("[Upload] native setter: assigned =", assigned,
+          " count =", input.files ? input.files.length : "?");
+    } catch (e) {
+      console.warn("[Upload] native setter failed:", e);
+    }
+
+    if (!assigned) {
+      try {
+        Object.defineProperty(input, "files", {
+          configurable: true,
+          get: () => dt.files
+        });
+        console.log("[Upload] defineProperty fallback used");
+        assigned = true;
+      } catch (e) {
+        throw new Error("[Upload] cannot assign files to input: " + e.message);
+      }
     }
 
     input.dispatchEvent(new Event("input", { bubbles: true }));
     input.dispatchEvent(new Event("change", { bubbles: true }));
+    console.log("[Upload] change events dispatched");
 
-    await waitForUploadSettle(files.length);
-    return true;
+    const ok = await waitForUploadSettle(files);
+    console.log("[Upload] settle result:", ok);
+    return ok;
   }
 
-  async function waitForUploadSettle(fileCount, timeoutMs = 30000) {
+  async function waitForUploadSettle(files, timeoutMs = 60000) {
+    const fileCount = files.length;
     const start = Date.now();
     let sawProgress = false;
+    let lastProgressAt = 0;
 
-    // Дать React/Vue отреагировать на change
-    await sleep(400);
+    await sleep(500);
 
     while (Date.now() - start < timeoutMs) {
       const progress = document.querySelectorAll(
-          '[class*="uploading"], [class*="upload-progress"], [role="progressbar"]'
+          '[class*="uploading"], [class*="upload-progress"], [class*="uploadProgress"], ' +
+          '[role="progressbar"], [class*="file-uploading"], [class*="uploading-file"]'
       );
       if (progress.length > 0) {
+        if (!sawProgress) console.log("[Upload] progress indicator detected");
         sawProgress = true;
+        lastProgressAt = Date.now();
         await sleep(250);
         continue;
       }
-      if (sawProgress) {
-        // Прогресс был и исчез — считаем, что загрузка завершена
-        await sleep(300);
+
+      if (sawProgress && Date.now() - lastProgressAt > 800) {
+        console.log("[Upload] progress disappeared → assume complete");
+        await sleep(400);
         return true;
       }
-      // Не увидели индикатора — даём фиксированное окно, но не растягиваем
-      if (Date.now() - start > 3000) return true;
-      await sleep(200);
+
+      const attachments = document.querySelectorAll(
+          '[class*="file-chip"], [class*="fileCard"], [class*="file-card"], ' +
+          '[class*="file-preview"], [class*="filePreview"], ' +
+          '[class*="file-item"], [class*="fileItem"], ' +
+          '[class*="attachment"], [class*="attached-file"]'
+      );
+      if (attachments.length >= fileCount) {
+        console.log("[Upload] attachment chips found:", attachments.length);
+        await sleep(400);
+        return true;
+      }
+
+      if (!sawProgress && Date.now() - start > 12000) {
+        console.warn("[Upload] no activity after 12s → assuming failed");
+        return false;
+      }
+
+      await sleep(300);
     }
-    return true;
+    console.warn("[Upload] timeout");
+    return sawProgress;
   }
 
-  // ---------- авто-продолжение ответа (Continue) ----------
+  // ---------- Continue watcher ----------
   const CONTINUE_TEXT = /^Continue$/i;
   let continueClickTimer = null;
   let lastContinueClickAt = 0;
@@ -290,20 +390,13 @@
     for (const span of spans) {
       const text = (span.textContent || "").trim();
       if (!CONTINUE_TEXT.test(text)) continue;
-
-      const btn =
-          span.closest('[role="button"]') ||
-          span.closest("button") ||
-          span.closest(".ds-button") ||
-          span.parentElement;
-
+      const btn = span.closest('[role="button"]') || span.closest("button") ||
+          span.closest(".ds-button") || span.parentElement;
       if (!btn) continue;
       if (btn.disabled) continue;
       if (btn.getAttribute("aria-disabled") === "true") continue;
-
       const rect = btn.getBoundingClientRect();
       if (rect.width === 0 && rect.height === 0) continue;
-
       return btn;
     }
     return null;
@@ -312,19 +405,11 @@
   function clickContinueIfPresent() {
     const btn = findContinueButton();
     if (!btn) return false;
-
     const now = Date.now();
-    if (btn === lastContinueEl && now - lastContinueClickAt < 700) {
-      return false;
-    }
-
+    if (btn === lastContinueEl && now - lastContinueClickAt < 700) return false;
     lastContinueEl = btn;
     lastContinueClickAt = now;
-
-    try {
-      clickWithMouse(btn);
-    } catch (_) {}
-
+    try { clickWithMouse(btn); } catch (_) {}
     return true;
   }
 
@@ -338,37 +423,64 @@
 
   function setupContinueWatcher() {
     scheduleContinueCheck();
-
     const root = document.documentElement || document;
     if (!root) return;
-
     try {
-      const observer = new MutationObserver(() => {
-        scheduleContinueCheck();
-      });
-      observer.observe(root, {
-        childList: true,
-        subtree: true,
-        characterData: true
-      });
+      const observer = new MutationObserver(() => scheduleContinueCheck());
+      observer.observe(root, { childList: true, subtree: true, characterData: true });
     } catch (_) {}
-
     if (document.readyState === "loading") {
       document.addEventListener("DOMContentLoaded", scheduleContinueCheck, { once: true });
     }
-
     setInterval(scheduleContinueCheck, 2000);
   }
 
   // ---------- sendToDeepSeek ----------
   async function sendToDeepSeek(text, files) {
-    // 1) Если есть файлы — сначала загружаем их
-    if (files && files.length > 0) {
-      await uploadFilesToInput(files);
+    let finalText = (text || "").trim();
+    const binaryFiles = [];
+    const inlinedNames = [];
+
+    if (files && Array.isArray(files) && files.length > 0) {
+      for (const f of files) {
+        if (isTextFile(f)) {
+          try {
+            const content = decodeBase64ToText(f.dataBase64 || "");
+            const fname = (f.name || "file.txt").replace(/[\r\n]/g, "_");
+            if (finalText.length > 0) finalText += "\n\n";
+            finalText +=
+                "=== Attached file: " + fname + " ===\n" +
+                content +
+                (content.endsWith("\n") ? "" : "\n") +
+                "=== End of file: " + fname + " ===";
+            inlinedNames.push(fname);
+            console.log("[Inline] text file inlined:", fname, "(", content.length, "chars )");
+          } catch (e) {
+            console.error("[Inline] failed for", f.name, "— fallback to upload:", e);
+            binaryFiles.push(f);
+          }
+        } else {
+          binaryFiles.push(f);
+        }
+      }
     }
 
-    // 2) Находим поле ввода
-    const input = await waitForElement('[placeholder="Сообщение для DeepSeek"]');
+    if (binaryFiles.length > 0) {
+      try {
+        await uploadFilesToInput(binaryFiles);
+      } catch (e) {
+        console.error("[Upload] binary files failed:", e);
+      }
+    }
+
+    if (!finalText && binaryFiles.length > 0) {
+      finalText = "Please analyze the attached file(s).";
+    }
+    if (!finalText) {
+      throw new Error("[DS] no content to send (empty text and no files)");
+    }
+
+    const input = await waitForElement('[placeholder="Сообщение для DeepSeek"]', 10000);
     if (!input) throw new Error("[DS] Поле ввода не найдено");
 
     const rect = input.getBoundingClientRect();
@@ -385,51 +497,44 @@
 
     await sleep(50);
 
-    // 3) Если есть текст — вставляем его
-    if (text && text.length > 0) {
-      if (input.isContentEditable) {
-        const range = document.createRange();
-        range.selectNodeContents(input);
-        range.collapse(false);
-        const sel = window.getSelection();
-        sel.removeAllRanges();
-        sel.addRange(range);
+    if (input.isContentEditable) {
+      const range = document.createRange();
+      range.selectNodeContents(input);
+      range.collapse(false);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
 
-        const ok = document.execCommand("insertText", false, text);
-        if (!ok) {
-          input.textContent = text;
-          input.dispatchEvent(new InputEvent("input", {
-            bubbles: true, data: text, inputType: "insertText"
-          }));
-        }
-      } else if (input.tagName === "TEXTAREA" || input.tagName === "INPUT") {
-        const proto = input.tagName === "TEXTAREA"
-            ? HTMLTextAreaElement.prototype
-            : HTMLInputElement.prototype;
-        Object.getOwnPropertyDescriptor(proto, "value").set.call(input, text);
-        input.dispatchEvent(new Event("input", { bubbles: true }));
-        input.dispatchEvent(new Event("change", { bubbles: true }));
-      } else {
-        throw new Error("[DS] Неизвестный тип поля ввода");
+      const ok = document.execCommand("insertText", false, finalText);
+      if (!ok) {
+        input.textContent = finalText;
+        input.dispatchEvent(new InputEvent("input", {
+          bubbles: true, data: finalText, inputType: "insertText"
+        }));
       }
+    } else if (input.tagName === "TEXTAREA" || input.tagName === "INPUT") {
+      const proto = input.tagName === "TEXTAREA"
+          ? HTMLTextAreaElement.prototype
+          : HTMLInputElement.prototype;
+      Object.getOwnPropertyDescriptor(proto, "value").set.call(input, finalText);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    } else {
+      throw new Error("[DS] Неизвестный тип поля ввода");
     }
 
-    await sleep(100);
+    await sleep(150);
 
-    // 4) Ждём появления и активации кнопки «Отправить» (до 15 с — с учётом загрузки файла)
     let sendBtn = null;
     const btnStartTime = Date.now();
-    while (Date.now() - btnStartTime < 15000) {
+    while (Date.now() - btnStartTime < 20000) {
       if (!sendBtn) {
         const icons = document.querySelectorAll(".ds-button__icon.ds-button__icon--last-child");
         for (const icon of icons) {
           const path = icon.querySelector("svg path");
           if (path && /M8\.3125\s+0\.980206/.test(path.getAttribute("d") || "")) {
-            sendBtn =
-                icon.closest(".ds-button") ||
-                icon.closest("button") ||
-                icon.parentElement ||
-                icon;
+            sendBtn = icon.closest(".ds-button") || icon.closest("button") ||
+                icon.parentElement || icon;
             break;
           }
         }
@@ -459,8 +564,9 @@
     sendBtn.dispatchEvent(new MouseEvent("click", bOpts));
 
     console.log("[DS] ✔ Отправлено:",
-        (files && files.length ? "[" + files.length + " файл(ов)] " : "")
-        + (text || ""));
+        (inlinedNames.length ? "[" + inlinedNames.join(", ") + "] " : "")
+        + (binaryFiles.length ? "[" + binaryFiles.length + " binary] " : "")
+        + "(text length: " + finalText.length + ")");
     return true;
   }
 
@@ -545,13 +651,10 @@
   async function enableThinking() {
     const toggle = await waitForElement("[aria-pressed]", 3000).then(() => findThinkingToggle());
     if (!toggle) throw new Error("[DS] Переключатель 'Глубокое мышление' не найден");
-
     const pressed = toggle.getAttribute("aria-pressed") === "true";
     if (pressed) return true;
-
     clickWithMouse(toggle);
     await sleep(500);
-
     if (toggle.getAttribute("aria-pressed") !== "true") {
       throw new Error("[DS] Не удалось включить режим размышления");
     }
@@ -561,13 +664,10 @@
   async function disableThinking() {
     const toggle = await waitForElement("[aria-pressed]", 3000).then(() => findThinkingToggle());
     if (!toggle) throw new Error("[DS] Переключатель 'Глубокое мышление' не найден");
-
     const pressed = toggle.getAttribute("aria-pressed") === "true";
     if (!pressed) return true;
-
     clickWithMouse(toggle);
     await sleep(500);
-
     if (toggle.getAttribute("aria-pressed") === "true") {
       throw new Error("[DS] Не удалось выключить режим размышления");
     }
@@ -615,13 +715,10 @@
   async function enableSmartSearch() {
     const toggle = await waitForSmartSearchToggle();
     if (!toggle) throw new Error("[DS] Переключатель 'Умный поиск' не найден");
-
     const pressed = toggle.getAttribute("aria-pressed") === "true";
     if (pressed) return true;
-
     clickWithMouse(toggle);
     await sleep(500);
-
     if (toggle.getAttribute("aria-pressed") !== "true") {
       throw new Error("[DS] Не удалось включить умный поиск");
     }
@@ -631,13 +728,10 @@
   async function disableSmartSearch() {
     const toggle = await waitForSmartSearchToggle();
     if (!toggle) throw new Error("[DS] Переключатель 'Умный поиск' не найден");
-
     const pressed = toggle.getAttribute("aria-pressed") === "true";
     if (!pressed) return true;
-
     clickWithMouse(toggle);
     await sleep(500);
-
     if (toggle.getAttribute("aria-pressed") === "true") {
       throw new Error("[DS] Не удалось выключить умный поиск");
     }
@@ -652,7 +746,6 @@
   window.enableSmartSearch   = enableSmartSearch;
   window.disableSmartSearch  = disableSmartSearch;
 
-  // ---------- запуск авто-продолжения ----------
   setupContinueWatcher();
 
   // ---------- приём команд из content.js ----------
@@ -732,6 +825,70 @@
       emitResult(false, "handler error: " + (e && e.message || e));
     }
   });
+
+  // ==========================================================
+  // НОВОЕ: Подключение к Java-серверу (SSE) для очистки истории
+  // ==========================================================
+  function connectSSE() {
+    console.log("[DS-INTERCEPT] Connecting to Java Bridge SSE for tabId:", tabId);
+    const evtSource = new EventSource(SERVER_URL + "/events?tabId=" + tabId);
+
+    evtSource.onopen = () => {
+      // Регистрируем вкладку на сервере
+      postLog("hello", JSON.stringify({ url: location.href, ua: navigator.userAgent }));
+    };
+
+    evtSource.onmessage = function(event) {
+      try {
+        const data = JSON.parse(event.data);
+        console.log("[DS-INTERCEPT] Command received from Java:", data);
+
+        // Обработка команд, приходящих напрямую от Java-сервера
+        if (data.type === 'newChat') {
+          window.newChat()
+              .then(() => postLog("result", "Новый чат создан"))
+              .catch(e => postLog("error", "newChat failed: " + e.message));
+        } else if (data.type === 'send') {
+          window.sendToDeepSeek(data.text, data.files)
+              .then(() => postLog("result", "sent: " + (data.text || "")))
+              .catch(e => postLog("error", "send failed: " + e.message));
+        } else if (data.type === 'enableThinking') {
+          window.enableThinking().catch(e => postLog("error", e.message));
+        } else if (data.type === 'disableThinking') {
+          window.disableThinking().catch(e => postLog("error", e.message));
+        } else if (data.type === 'enableSmartSearch') {
+          window.enableSmartSearch().catch(e => postLog("error", e.message));
+        } else if (data.type === 'disableSmartSearch') {
+          window.disableSmartSearch().catch(e => postLog("error", e.message));
+        } else if (data.type === 'eval') {
+          try {
+            const res = (0, eval)(data.code);
+            postLog("result", safeStringify(res));
+          } catch(e) {
+            postLog("error", "eval error: " + e.message);
+          }
+        }
+      } catch (e) {
+        console.error("[DS-INTERCEPT] SSE parse error:", e);
+      }
+    };
+
+    evtSource.onerror = function() {
+      console.warn("[DS-INTERCEPT] SSE disconnected, retrying in 3s...");
+      evtSource.close();
+      setTimeout(connectSSE, 3000);
+    };
+  }
+
+  // Отправка сообщения о закрытии вкладки на сервер
+  window.addEventListener('beforeunload', () => {
+    try {
+      navigator.sendBeacon(SERVER_URL + "/log", JSON.stringify({ level: "bye", tabId, text: "window closed" }));
+    } catch (_) {}
+  });
+
+  // Запуск SSE
+  connectSSE();
 
   try { window.dispatchEvent(new CustomEvent(EVT_READY)); } catch (_) {}
 

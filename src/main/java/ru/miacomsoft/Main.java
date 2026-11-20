@@ -13,6 +13,12 @@ import java.util.concurrent.TimeUnit;
 /**
  * Точка входа.
  *
+ * Аргументы командной строки (args):
+ *   --no-browser              не открывать Chrome
+ *   --debug                   включить отладочный вывод JSON в OllamaApiService
+ *   --extension=<путь>        путь к папке расширения Chrome
+ *   --profile=<путь>          путь к профилю Chrome
+ *
  * stdin:
  *   обычная строка    → sendToDeepSeek(text)
  *   "!js..."          → eval в консоли страницы
@@ -31,17 +37,24 @@ public class Main {
 
     public static final int PORT = 11434;
 
+    // --- НОВОЕ: сделано public, чтобы OllamaApiService мог обращаться к истории ---
+    public static final ChatSession session = new ChatSession();
+
     public static void main(String[] args) throws Exception {
         boolean noBrowser = false;
         for (String arg : args) {
             if ("--no-browser".equals(arg)) {
                 noBrowser = true;
+            } else if ("--debug".equals(arg)) {
+                // Включаем отладочный вывод JSON в OllamaApiService
+                System.setProperty("ds.debug", "true");
             } else if (arg.startsWith("--extension=")) {
                 System.setProperty("ds.extension.dir", arg.substring("--extension=".length()));
             } else if (arg.startsWith("--profile=")) {
                 System.setProperty("ds.profile.dir", arg.substring("--profile=".length()));
             }
         }
+        System.setProperty("ds.debug", "true");
 
         HttpServer server = HttpServer.create(new InetSocketAddress(PORT), 0);
         server.setExecutor(Executors.newCachedThreadPool());
@@ -87,6 +100,8 @@ public class Main {
         System.out.println("[SERVER] Bridge SSE : http://localhost:" + PORT + "/events?tabId=...");
         System.out.println("[SERVER] Bridge log : http://localhost:" + PORT + "/log");
         System.out.println("[SERVER] Tabs list  : http://localhost:" + PORT + "/tabs");
+        System.out.println("[SERVER] debug JSON : "
+                + (Boolean.parseBoolean(System.getProperty("ds.debug", "false")) ? "ON" : "off"));
         System.out.println();
         System.out.println("  <текст>              → sendToDeepSeek(text)");
         System.out.println("  ! <js>               → eval в консоли страницы");
@@ -114,6 +129,8 @@ public class Main {
         }
 
         if (trimmed.equals("/new") || trimmed.equals("/newchat")) {
+            // --- НОВОЕ: Очищаем историю на стороне сервера ---
+            session.clearHistory();
             BridgeService.sendNewChatFromStdin();
             return;
         }
@@ -174,6 +191,10 @@ public class Main {
                     text = rest.substring(sp + 1).trim();
                 }
             }
+
+            // --- НОВОЕ: Сохраняем отправку файла в историю ---
+            session.addMessage("user", "Отправлен файл: " + path + (text.isEmpty() ? "" : " | Текст: " + text));
+
             BridgeService.sendFileFromStdin(path, text);
             return;
         }
@@ -216,6 +237,9 @@ public class Main {
             BridgeService.sendEvalFromStdin(trimmed.substring(1).trim());
             return;
         }
+
+        // --- НОВОЕ: Сохраняем обычный текст в историю перед отправкой ---
+        session.addMessage("user", line);
 
         BridgeService.sendFromStdin(line);
     }

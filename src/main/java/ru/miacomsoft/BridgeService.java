@@ -28,27 +28,15 @@ import java.util.concurrent.TimeUnit;
  *
  *   GET  /events?tabId=X  : SSE (server → browser), у каждой вкладки свой tabId
  *   POST /log             : логи, стримы, состояние (browser → server)
+ *                            level="hello"   — регистрация вкладки
+ *                            level="bye"     — вкладка закрывается (sendBeacon)
+ *                            level="mode-state", "token-limit", "stream", …
  *   GET  /tabs            : список активных вкладок (JSON)
- *
- * Публичный API:
- *   - sendFromStdin(text)                          — sendToDeepSeek
- *   - sendEvalFromStdin(code)                      — eval
- *   - sendNewChatFromStdin()                       — новый чат
- *   - sendEnableThinkingFromStdin()                — включить режим размышления
- *   - sendDisableThinkingFromStdin()               — выключить режим размышления
- *   - sendEnableSmartSearchFromStdin()             — включить умный поиск
- *   - sendDisableSmartSearchFromStdin()            — выключить умный поиск
- *   - sendFileFromStdin(path, text)                — отправить файл
- *   - printTabs() / printState()
- *   - selectTabByIndex/Id/Prefix
- *   - sendChat(text) / sendChat(text, attachments)
- *   - sendChatStream(text, listener) / sendChatStream(text, attachments, listener)
  */
 public class BridgeService {
 
     static final long WATCHDOG_TIMEOUT_MS = 120_000;
 
-    // Лимиты на файлы (в байтах бинарных данных до base64)
     public static final long MAX_FILE_BYTES  = 20L * 1024 * 1024;
     public static final long MAX_TOTAL_BYTES = 50L * 1024 * 1024;
 
@@ -70,11 +58,10 @@ public class BridgeService {
     static final Set<String> rejectedStreams =
             Collections.newSetFromMap(new ConcurrentHashMap<>());
 
-    // ---------- вложение ----------
     public static class Attachment {
         public final String name;
         public final String mimeType;
-        public final String dataBase64;   // чистый base64 без data: префикса
+        public final String dataBase64;
         public Attachment(String name, String mimeType, String dataBase64) {
             this.name = name;
             this.mimeType = mimeType;
@@ -98,6 +85,7 @@ public class BridgeService {
         volatile boolean tokenExhausted = false;
         volatile boolean modesReported  = false;
         volatile String  info           = "";
+        volatile String  closeReason    = "";   // [BYE]
         Client(String tabId) { this.tabId = tabId; }
     }
 
@@ -117,7 +105,7 @@ public class BridgeService {
         server.createContext("/tabs",   BridgeService::handleTabs);
     }
 
-    // ---------- публичный API ----------
+    // ---------- публичный API (без изменений) ----------
     public static void sendFromStdin(String text) {
         JSONObject cmd = new JSONObject();
         cmd.put("type", "send");
@@ -162,7 +150,6 @@ public class BridgeService {
         enqueue(new PendingCommand(cmd.toString(), null, true, true));
     }
 
-    // ---------- отправка файла со stdin ----------
     public static void sendFileFromStdin(String path, String text) {
         File f = new File(path);
         if (!f.isFile()) {
@@ -256,7 +243,6 @@ public class BridgeService {
     }
 
     public static void sendChatStream(String text, List<Attachment> attachments, StreamListener listener) {
-        // Проверка суммарного размера
         long totalB64 = 0;
         if (attachments != null) {
             for (Attachment a : attachments) {
@@ -487,12 +473,13 @@ public class BridgeService {
 
         trySendNext();
 
+        final String myTabId = tabId;
         try {
             os.write(": connected\n\n".getBytes(StandardCharsets.UTF_8));
             os.flush();
 
             while (client.active) {
-                String msg = client.queue.poll(15, TimeUnit.SECONDS);
+                String msg = client.queue.poll(5, TimeUnit.SECONDS);   // [BYE] было 15
                 if (msg == null) {
                     os.write(": ping\n\n".getBytes(StandardCharsets.UTF_8));
                 } else {
@@ -503,9 +490,19 @@ public class BridgeService {
         } catch (InterruptedException ignored) {
         } catch (IOException ignored) {
         } finally {
+            // [BYE] чистим клиента и связанные ссылки, даже если bye не пришёл
             client.active = false;
             synchronized (clients) { clients.remove(client); }
+            synchronized (BridgeService.class) {
+                if (myTabId.equals(selectedTabId))      selectedTabId = null;
+                if (myTabId.equals(activeServingTabId)) {
+                    activeServingTabId = null;
+                    // не сбрасываем awaitingResponse — иначе потеряем listener,
+                    // просто дадим watchdog'у обработать через 120 с.
+                }
+            }
             try { ex.close(); } catch (Exception ignore) {}
+            trySendNext();
         }
     }
 
@@ -541,6 +538,7 @@ public class BridgeService {
                 case "hello":       handleHello(tabId, text); break;
                 case "mode-state":  handleModeState(tabId, text); break;
                 case "token-limit": handleTokenLimit(tabId, text); break;
+                case "bye":         handleBye(tabId, text); break;      // [BYE]
             }
         } catch (Exception e) {
             System.err.println("[log] " + e.getMessage());
@@ -551,6 +549,56 @@ public class BridgeService {
         ex.sendResponseHeaders(200, ok.length);
         ex.getResponseBody().write(ok);
         ex.close();
+    }
+
+    // [BYE] обработка закрытия вкладки
+    static void handleBye(String tabId, String reason) {
+        if (tabId == null || tabId.isEmpty()) return;
+
+        Client c = findClient(tabId);
+        if (c != null) {
+            c.closeReason = reason == null ? "" : reason;
+            c.active = false;
+            // разбудить SSE-цикл, чтобы он вышел из ожидания
+            c.queue.offer("__close__");
+        }
+
+        synchronized (clients) { clients.remove(c); }
+
+        boolean wasSelected = tabId.equals(selectedTabId);
+        boolean wasServing  = tabId.equals(activeServingTabId);
+
+        if (wasSelected) selectedTabId = null;
+
+        if (wasServing) {
+            // вкладка закрылась во время обслуживания: сообщаем listener'у
+            StreamListener l = activeListener;
+            boolean wasStdin = activeFromStdin;
+            activeListener = null;
+            awaitingResponse = false;
+            activeFromStdin = false;
+            activeIsChatCommand = false;
+            activeServingTabId = null;
+            activeStreamId = null;
+            activeStreamType = null;
+
+            if (l != null) {
+                try { l.onError("tab closed: " + shortId(tabId)); } catch (Exception ignored) {}
+            } else if (wasStdin) {
+                System.out.println();
+                System.out.println("[!] tab closed: " + shortId(tabId));
+                System.out.print("> ");
+                System.out.flush();
+            }
+        }
+
+        System.out.println();
+        System.out.println("[BYE] tab " + shortId(tabId)
+                + " closed" + (reason != null && !reason.isEmpty() ? " (" + reason + ")" : ""));
+        System.out.print("> ");
+        System.out.flush();
+
+        trySendNext();
     }
 
     static void handleHello(String tabId, String info) {

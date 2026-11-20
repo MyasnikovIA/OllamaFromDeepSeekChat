@@ -23,7 +23,7 @@
 
   let postQueue = Promise.resolve();
   function postLog(level, text, streamId, streamType) {
-    const payload = { level, text, tabId: TAB_ID };   // НОВОЕ: tabId
+    const payload = { level, text, tabId: TAB_ID };
     if (streamId) payload.streamId = streamId;
     if (streamType) payload.streamType = streamType;
     const body = JSON.stringify(payload);
@@ -37,6 +37,50 @@
     return postQueue;
   }
 
+  // ---------- НОВОЕ: уведомление сервера о закрытии вкладки ----------
+  let byeSent = false;
+  function sendBye(reason) {
+    if (byeSent) return;
+    byeSent = true;
+    try {
+      const body = JSON.stringify({
+        level:  "bye",
+        tabId:  TAB_ID,
+        reason: reason || "pagehide",
+        text:   reason || "pagehide"
+      });
+      // sendBeacon гарантированно доставляется даже при закрытии вкладки
+      if (navigator.sendBeacon) {
+        const ok = navigator.sendBeacon(
+            SERVER + "/log",
+            new Blob([body], { type: "application/json" })
+        );
+        if (ok) return;
+      }
+      // fallback: keepalive-fetch (поддерживается современным Chrome)
+      fetch(SERVER + "/log", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+        keepalive: true
+      }).catch(() => {});
+    } catch (_) {}
+  }
+
+  window.addEventListener("pagehide", (e) => {
+    sendBye(e && e.persisted ? "pagehide-persisted" : "pagehide");
+  }, { capture: true });
+
+  window.addEventListener("beforeunload", () => {
+    sendBye("beforeunload");
+  }, { capture: true });
+
+  // на случай выгрузки SPA-страницы без pagehide (крайне редко)
+  window.addEventListener("unload", () => {
+    sendBye("unload");
+  }, { capture: true });
+
+  // ---------- дальше без изменений ----------
   const streams = new Map();
 
   function getStream(streamId) {
@@ -226,14 +270,12 @@
     }
 
     try {
-      // ИЗМЕНЕНО: добавляем tabId
       es = new EventSource(SERVER + "/events?tabId=" + encodeURIComponent(TAB_ID));
     } catch (_) {
       scheduleReconnect();
       return;
     }
 
-    // ИЗМЕНЕНО: на onopen регистрируем вкладку и запрашиваем состояние
     es.onopen = () => {
       console.info(`${TAG} EventSource connected, tabId=${TAB_ID}`);
       registerTab();
