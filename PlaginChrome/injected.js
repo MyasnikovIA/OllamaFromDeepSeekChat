@@ -11,26 +11,13 @@
   const EVT_RESULT   = "__ds_eval_result__";
   const EVT_READY    = "__ds_injected_ready__";
 
-  // --- НОВОЕ: константы для связи с Java-сервером ---
-  const SERVER_URL = "http://localhost:11434";
-  const urlParams = new URLSearchParams(window.location.search);
-  const tabId = urlParams.get('tabId') || 'tab-' + Math.random().toString(36).substring(2, 10);
+  // ВАЖНО: здесь больше нет SERVER_URL, tabId, postLog, connectSSE,
+  // beforeunload-beacon. Всё общение с сервером — через content.js.
 
   let __streamSeq = 0;
   const nextStreamId = () =>
       "s" + Date.now() + "-" + (++__streamSeq) + "-" +
       Math.random().toString(36).slice(2, 8);
-
-  // --- НОВОЕ: отправка данных на Java-сервер (логи, стримы) ---
-  const postLog = (level, text, streamId = "", streamType = "") => {
-    try {
-      fetch(SERVER_URL + "/log", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ level, text, streamId, streamType, tabId })
-      }).catch(() => {});
-    } catch (_) {}
-  };
 
   const emit = (chunk, phase = "chunk", streamId = "") => {
     try {
@@ -77,8 +64,6 @@
         const skip = SKIP_PREFIXES.some((p) => text.startsWith(p));
         if (!skip) {
           try { emitConsole(level, text); } catch (_) {}
-          // НОВОЕ: дублируем консоль на Java-сервер
-          if (level === "error") postLog("console-error", text);
         }
       }
       return orig(...args);
@@ -110,7 +95,7 @@
 
     (async () => {
       const reader = cloned.body && cloned.body.getReader();
-      if (!reader) { emit("", "done", streamId); postLog("stream-done", "", streamId); return; }
+      if (!reader) { emit("", "done", streamId); return; }
       const decoder = new TextDecoder("utf-8");
       let buffer = "";
       try {
@@ -125,7 +110,6 @@
             for (const line of event.split("\n")) {
               if (line.startsWith("data:")) {
                 emit(line, "sse", streamId);
-                postLog("stream", line, streamId, "RESPONSE"); // НОВОЕ: отправка стрима в Java
               }
             }
           }
@@ -134,7 +118,6 @@
           for (const line of buffer.split("\n")) {
             if (line.startsWith("data:")) {
               emit(line, "sse", streamId);
-              postLog("stream", line, streamId, "RESPONSE");
             }
           }
         }
@@ -142,7 +125,6 @@
         console.warn("[DS-INTERCEPT] stream error:", err);
       } finally {
         emit("", "done", streamId);
-        postLog("stream-done", "", streamId); // НОВОЕ: конец стрима в Java
       }
     })();
 
@@ -176,7 +158,6 @@
       for (const line of fresh.split("\n")) {
         if (line.startsWith("data:")) {
           emit(line, "sse", streamId);
-          postLog("stream", line, streamId, "RESPONSE"); // НОВОЕ: отправка XHR-стрима в Java
         }
       }
     });
@@ -184,7 +165,6 @@
     xhr.addEventListener("loadend", () => {
       if (target && streamId) {
         emit("", "done", streamId);
-        postLog("stream-done", "", streamId); // НОВОЕ
       }
     });
 
@@ -229,7 +209,7 @@
     return new Blob([bytes], { type: mime || "application/octet-stream" });
   }
 
-  // ---------- НОВОЕ: определение текстовых файлов и декодирование ----------
+  // ---------- определение текстовых файлов и декодирование ----------
   const TEXT_EXT_RE = /\.(txt|text|md|markdown|json|jsonl|csv|tsv|html?|xml|ya?ml|log|ini|conf|cfg|toml|properties|js|jsx|ts|tsx|py|java|kt|c|cc|cpp|cxx|h|hpp|cs|go|rs|rb|php|pl|lua|swift|m|mm|scala|clj|ex|exs|erl|hs|r|sql|sh|bash|zsh|bat|cmd|ps1|tex|rtf|env)$/i;
   const TEXT_MIME_RE = /^(text\/|application\/(json|xml|x-yaml|yaml|javascript|typescript|sql|x-sh|x-shellscript|x-httpd-php))/i;
 
@@ -825,70 +805,6 @@
       emitResult(false, "handler error: " + (e && e.message || e));
     }
   });
-
-  // ==========================================================
-  // НОВОЕ: Подключение к Java-серверу (SSE) для очистки истории
-  // ==========================================================
-  function connectSSE() {
-    console.log("[DS-INTERCEPT] Connecting to Java Bridge SSE for tabId:", tabId);
-    const evtSource = new EventSource(SERVER_URL + "/events?tabId=" + tabId);
-
-    evtSource.onopen = () => {
-      // Регистрируем вкладку на сервере
-      postLog("hello", JSON.stringify({ url: location.href, ua: navigator.userAgent }));
-    };
-
-    evtSource.onmessage = function(event) {
-      try {
-        const data = JSON.parse(event.data);
-        console.log("[DS-INTERCEPT] Command received from Java:", data);
-
-        // Обработка команд, приходящих напрямую от Java-сервера
-        if (data.type === 'newChat') {
-          window.newChat()
-              .then(() => postLog("result", "Новый чат создан"))
-              .catch(e => postLog("error", "newChat failed: " + e.message));
-        } else if (data.type === 'send') {
-          window.sendToDeepSeek(data.text, data.files)
-              .then(() => postLog("result", "sent: " + (data.text || "")))
-              .catch(e => postLog("error", "send failed: " + e.message));
-        } else if (data.type === 'enableThinking') {
-          window.enableThinking().catch(e => postLog("error", e.message));
-        } else if (data.type === 'disableThinking') {
-          window.disableThinking().catch(e => postLog("error", e.message));
-        } else if (data.type === 'enableSmartSearch') {
-          window.enableSmartSearch().catch(e => postLog("error", e.message));
-        } else if (data.type === 'disableSmartSearch') {
-          window.disableSmartSearch().catch(e => postLog("error", e.message));
-        } else if (data.type === 'eval') {
-          try {
-            const res = (0, eval)(data.code);
-            postLog("result", safeStringify(res));
-          } catch(e) {
-            postLog("error", "eval error: " + e.message);
-          }
-        }
-      } catch (e) {
-        console.error("[DS-INTERCEPT] SSE parse error:", e);
-      }
-    };
-
-    evtSource.onerror = function() {
-      console.warn("[DS-INTERCEPT] SSE disconnected, retrying in 3s...");
-      evtSource.close();
-      setTimeout(connectSSE, 3000);
-    };
-  }
-
-  // Отправка сообщения о закрытии вкладки на сервер
-  window.addEventListener('beforeunload', () => {
-    try {
-      navigator.sendBeacon(SERVER_URL + "/log", JSON.stringify({ level: "bye", tabId, text: "window closed" }));
-    } catch (_) {}
-  });
-
-  // Запуск SSE
-  connectSSE();
 
   try { window.dispatchEvent(new CustomEvent(EVT_READY)); } catch (_) {}
 

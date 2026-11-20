@@ -250,9 +250,10 @@
   });
 
   window.addEventListener(EVT_CONSOLE, (evt) => {
-    const { level = "log", text = "" } = evt.detail || {};
-    if (!text || !text.trim()) return;
-    postLog(level, text);
+      const { level = "log", text = "" } = evt.detail || {};
+      if (!text || !text.trim()) return;
+      // сервер реагирует только на "console-error"; маппим error → console-error
+      postLog(level === "error" ? "console-error" : level, text);
   });
 
   window.addEventListener(EVT_RESULT, (evt) => {
