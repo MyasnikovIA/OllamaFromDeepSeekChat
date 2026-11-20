@@ -30,6 +30,10 @@ import java.util.concurrent.TimeUnit;
  *   "/file <path> [text]"  → отправить файл (можно с текстом)
  *   "/tabs"           → список открытых вкладок DeepSeek
  *   "/tab <n|id>"     → выбрать вкладку по номеру или tabId (можно префикс)
+ *   "/opentab [url]"  → открыть новую вкладку DeepSeek (по умолчанию chat.deepseek.com)
+ *   "/newtab [url]"   → алиас для /opentab
+ *   "/close <n|id>"   → закрыть вкладку по номеру или tabId (можно префикс)
+ *   "/closeall"       → закрыть все вкладки chat.deepseek.com/*
  *   "/state"          → показать режимы активной вкладки
  *   "/help"           → подсказка
  */
@@ -37,7 +41,6 @@ public class Main {
 
     public static final int PORT = 11434;
 
-    // --- НОВОЕ: сделано public, чтобы OllamaApiService мог обращаться к истории ---
     public static final ChatSession session = new ChatSession();
 
     public static void main(String[] args) throws Exception {
@@ -46,7 +49,6 @@ public class Main {
             if ("--no-browser".equals(arg)) {
                 noBrowser = true;
             } else if ("--debug".equals(arg)) {
-                // Включаем отладочный вывод JSON в OllamaApiService
                 System.setProperty("ds.debug", "true");
             } else if (arg.startsWith("--extension=")) {
                 System.setProperty("ds.extension.dir", arg.substring("--extension=".length()));
@@ -113,6 +115,10 @@ public class Main {
         System.out.println("  /file <path> [text]  → отправить файл в DeepSeek (с текстом)");
         System.out.println("  /tabs                → список открытых вкладок DeepSeek");
         System.out.println("  /tab <n|id>          → выбрать вкладку (#n или tabId/префикс)");
+        System.out.println("  /opentab [url]       → открыть новую вкладку DeepSeek");
+        System.out.println("  /newtab [url]        → алиас для /opentab");
+        System.out.println("  /close <n|id>        → закрыть вкладку (#n, tabId или префикс)");
+        System.out.println("  /closeall            → закрыть ВСЕ вкладки chat.deepseek.com/*");
         System.out.println("  /state               → показать режимы активной вкладки");
         System.out.println("  /help                → эта подсказка");
         System.out.println("========================================================");
@@ -129,7 +135,6 @@ public class Main {
         }
 
         if (trimmed.equals("/new") || trimmed.equals("/newchat")) {
-            // --- НОВОЕ: Очищаем историю на стороне сервера ---
             session.clearHistory();
             BridgeService.sendNewChatFromStdin();
             return;
@@ -192,7 +197,6 @@ public class Main {
                 }
             }
 
-            // --- НОВОЕ: Сохраняем отправку файла в историю ---
             session.addMessage("user", "Отправлен файл: " + path + (text.isEmpty() ? "" : " | Текст: " + text));
 
             BridgeService.sendFileFromStdin(path, text);
@@ -210,6 +214,60 @@ public class Main {
             return;
         }
 
+        // ========================================================
+        //  НОВОЕ: /opentab [url] и /newtab [url]
+        // ========================================================
+        if (trimmed.equals("/opentab")
+                || trimmed.equals("/newtab")
+                || trimmed.startsWith("/opentab ")
+                || trimmed.startsWith("/newtab ")) {
+            String arg = "";
+            int sp = trimmed.indexOf(' ');
+            if (sp >= 0) arg = trimmed.substring(sp + 1).trim();
+            BridgeService.openNewTabFromStdin(arg);
+            return;
+        }
+
+        // ========================================================
+        //  НОВОЕ: /closeall
+        // ========================================================
+        if (trimmed.equals("/closeall")) {
+            BridgeService.closeAllTabsFromStdin();
+            return;
+        }
+
+        // ========================================================
+        //  НОВОЕ: /close <n|id|prefix>
+        // ========================================================
+        if (trimmed.startsWith("/close ")) {
+            String arg = trimmed.substring("/close ".length()).trim();
+            if (arg.isEmpty()) {
+                System.out.println("[TAB] usage: /close <n|id>");
+                System.out.print("> ");
+                System.out.flush();
+                return;
+            }
+            String targetId = null;
+            try {
+                int idx = Integer.parseInt(arg);
+                targetId = BridgeService.getTabIdByIndex(idx);
+            } catch (NumberFormatException e) {
+                targetId = BridgeService.findActiveTabId(arg);
+            }
+            if (targetId == null) {
+                System.out.println("[TAB] not found: " + arg);
+                System.out.print("> ");
+                System.out.flush();
+                return;
+            }
+            System.out.println("[TAB] closing: " + targetId);
+            BridgeService.closeTabFromStdin(targetId);
+            return;
+        }
+
+        // ========================================================
+        //  /tab <n|id>
+        // ========================================================
         if (trimmed.startsWith("/tab ")) {
             String arg = trimmed.substring("/tab ".length()).trim();
             if (arg.isEmpty()) {
@@ -238,9 +296,8 @@ public class Main {
             return;
         }
 
-        // --- НОВОЕ: Сохраняем обычный текст в историю перед отправкой ---
+        // --- обычный текст ---
         session.addMessage("user", line);
-
         BridgeService.sendFromStdin(line);
     }
 }

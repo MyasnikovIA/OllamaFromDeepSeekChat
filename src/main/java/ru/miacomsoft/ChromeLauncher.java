@@ -43,6 +43,26 @@ public final class ChromeLauncher {
         }
     }
 
+    // ============================================================
+    //  НОВОЕ: открыть Chrome с произвольным URL (fallback для /opentab)
+    // ============================================================
+    public static void launchNewWindow(String url) {
+        String target = (url == null || url.trim().isEmpty()) ? DEEPSEEK_URL : url.trim();
+        OS os = detectOS();
+        String chrome = findChromeExecutable(os);
+        if (chrome == null) {
+            System.out.println("[CHROME] Chrome not found, opening default browser");
+            openDefaultBrowser(os, target);
+            return;
+        }
+        try {
+            launchChrome(chrome, target);
+        } catch (IOException e) {
+            System.err.println("[CHROME] launch failed: " + e.getMessage());
+            openDefaultBrowser(os, target);
+        }
+    }
+
     static String findChromeExecutable(OS os) {
         switch (os) {
             case WINDOWS: return findChromeWindows();

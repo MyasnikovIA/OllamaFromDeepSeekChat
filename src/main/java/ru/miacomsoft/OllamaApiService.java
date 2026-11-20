@@ -13,9 +13,11 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
+/**
+ * Эмуляция Ollama API поверх BridgeService.
+ * ... (документация сохранена)
+ */
 public class OllamaApiService {
 
     static final String MODEL_NAME = "DeepSeekCloud";
@@ -23,15 +25,18 @@ public class OllamaApiService {
     static final String DIGEST = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
     static final long   CREATED_EPOCH = 1704067200L;
 
+    // [LOG] флаг отладки: -Dds.debug=true или DS_DEBUG=1
     static final boolean DEBUG = Boolean.parseBoolean(
             System.getProperty("ds.debug",
                     System.getenv().getOrDefault("DS_DEBUG", "false")));
 
+    // [LOG] максимальная длина тела, которую печатаем целиком
     static final int LOG_BODY_MAX = 4000;
 
-    // Регулярное выражение для поиска блоков [CONTEXT N]: ... [END CONTEXT N]
-    static final Pattern CONTEXT_PATTERN = Pattern.compile("\\[CONTEXT \\d+\\]:\\s*([\\s\\S]*?)\\s*\\[END CONTEXT \\d+\\]");
+    // --- Ссылка на единую сессию из Main.java ---
+    static final ChatSession session = Main.session;
 
+    // ---------- извлечённый пользовательский ввод ----------
     static class UserInput {
         String text = "";
         final List<BridgeService.Attachment> attachments = new ArrayList<>();
@@ -54,81 +59,43 @@ public class OllamaApiService {
         server.createContext("/api/create",    OllamaApiService::handleCreate);
         server.createContext("/api/copy",      OllamaApiService::handleCopy);
         server.createContext("/api/delete",    OllamaApiService::handleDelete);
-        server.createContext("/v1",            OllamaApiService::handleV1);
+
+        server.createContext("/v1", OllamaApiService::handleV1);
     }
 
     // =====================================================================
-    //  [LOG] ОТЛАДКА JSON
+    //  [LOG] ЦЕНТРАЛИЗОВАННОЕ ЛОГИРОВАНИЕ ВСЕХ ВХОДЯЩИХ ЗАПРОСОВ
     // =====================================================================
 
-    static void logJsonBody(String tag, String body) {
+    static void logIncomingRequest(HttpExchange ex, String body) {
         if (!DEBUG) return;
-        String shown = body == null ? "<null>" : (body.length() <= LOG_BODY_MAX ? body : body);
-        System.out.println("\n[REQ] " + tag);
-        System.out.println("[REQ] body=" + shown);
-        System.out.print("> "); System.out.flush();
-    }
 
-    static void logUserInput(String tag, UserInput ui) {
-        if (!DEBUG) return;
-        System.out.println("\n[REQ] " + tag + " → extracted:");
-        System.out.println("[REQ]   text.length=" + (ui.text == null ? 0 : ui.text.length()) +
-                (ui.text != null && !ui.text.isEmpty() ? "  text=" + abbrev(ui.text, 200) : "  text=<empty>"));
-        if (ui.attachments.isEmpty()) {
-            System.out.println("[REQ]   attachments: <none>");
-        } else {
-            for (int i = 0; i < ui.attachments.size(); i++) {
-                BridgeService.Attachment a = ui.attachments.get(i);
-                long binLen = a.dataBase64 == null ? 0 : (a.dataBase64.length() * 3L) / 4L;
-                System.out.println("[REQ]   attachment #" + (i + 1) + ": name=" + a.name + " mime=" + a.mimeType + " b64len=" + (a.dataBase64 == null ? 0 : a.dataBase64.length()) + " binlen=" + binLen);
-            }
+        String method = ex.getRequestMethod();
+        String uri = ex.getRequestURI().toString();
+
+        System.out.println();
+        System.out.println("[INCOMING] " + method + " " + uri);
+
+        if (body != null && !body.trim().isEmpty()) {
+            // Если тело слишком большое, обрезаем для читаемости консоли
+            String shownBody = body.length() > 2000 ? body.substring(0, 2000) + "... [truncated, total " + body.length() + " chars]" : body;
+            System.out.println("[INCOMING] Body: " + shownBody);
         }
-        System.out.print("> "); System.out.flush();
+        System.out.print("> ");
+        System.out.flush();
     }
 
-    static String abbrev(String s, int max) {
-        if (s == null) return "<null>";
-        String oneLine = s.replace("\r", "\\r").replace("\n", "\\n");
-        if (oneLine.length() <= max) return oneLine;
-        return oneLine.substring(0, max) + "…";
+    static String readBody(HttpExchange ex) throws IOException {
+        try (InputStream is = ex.getRequestBody()) {
+            String body = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+            logIncomingRequest(ex, body); // Автоматическое логирование POST-запросов
+            return body;
+        }
     }
 
     // =====================================================================
-    //  ИЗВЛЕЧЕНИЕ ПОЛЬЗОВАТЕЛЬСКОГО ВВОДА И КОНТЕКСТА
+    //  ИЗВЛЕЧЕНИЕ ПОЛЬЗОВАТЕЛЬСКОГО ВВОДА
     // =====================================================================
-
-    // --- НОВОЕ: Извлечение новых блоков контекста ---
-    static String extractNewContext(JSONObject req) {
-        if (req == null || !req.has("messages")) return "";
-        JSONArray msgs = req.optJSONArray("messages");
-        if (msgs == null) return "";
-
-        StringBuilder newContext = new StringBuilder();
-
-        // Проходим по всем сообщениям (обычно контекст лежит в роли "system")
-        for (int i = 0; i < msgs.length(); i++) {
-            JSONObject m = msgs.optJSONObject(i);
-            if (m == null) continue;
-
-            String role = m.optString("role", "");
-            if (!"system".equals(role) && !"user".equals(role)) continue;
-
-            String content = m.optString("content", "");
-            Matcher matcher = CONTEXT_PATTERN.matcher(content);
-
-            while (matcher.find()) {
-                String ctxBlock = matcher.group(1).trim();
-                if (!ctxBlock.isEmpty() && !Main.session.isContextSent(ctxBlock)) {
-                    // Добавляем только новые блоки
-                    newContext.append("=== НОВЫЙ КОНТЕКСТ ===\n")
-                            .append(ctxBlock)
-                            .append("\n======================\n\n");
-                    Main.session.markContextSent(ctxBlock);
-                }
-            }
-        }
-        return newContext.toString();
-    }
 
     static UserInput extractUserInput(JSONObject req) {
         UserInput out = new UserInput();
@@ -181,8 +148,11 @@ public class OllamaApiService {
                             String data  = src.optString("data", "");
                             String media = src.optString("media_type", "image/png");
                             if (!data.isEmpty()) {
-                                String ext = media.contains("/") ? media.substring(media.indexOf('/') + 1) : "png";
-                                out.attachments.add(new BridgeService.Attachment("image." + ext, media, data));
+                                String ext = media.contains("/")
+                                        ? media.substring(media.indexOf('/') + 1)
+                                        : "png";
+                                out.attachments.add(new BridgeService.Attachment(
+                                        "image." + ext, media, data));
                             }
                         }
                     }
@@ -203,7 +173,8 @@ public class OllamaApiService {
                             int semi = mime.indexOf(';');
                             if (semi > 0) mime = mime.substring(0, semi).trim();
 
-                            out.attachments.add(new BridgeService.Attachment(name, mime, data));
+                            out.attachments.add(new BridgeService.Attachment(
+                                    name, mime, data));
                         }
                     }
                 }
@@ -216,10 +187,12 @@ public class OllamaApiService {
                 String b64 = imgs.optString(i, "");
                 if (!b64.isEmpty()) {
                     String clean = b64.startsWith("data:") ? stripDataUrl(b64) : b64;
-                    out.attachments.add(new BridgeService.Attachment("image-" + (i + 1) + ".png", "image/png", clean));
+                    out.attachments.add(new BridgeService.Attachment(
+                            "image-" + (i + 1) + ".png", "image/png", clean));
                 }
             }
         }
+
         return out;
     }
 
@@ -232,7 +205,8 @@ public class OllamaApiService {
                 String b64 = imgs.optString(i, "");
                 if (!b64.isEmpty()) {
                     String clean = b64.startsWith("data:") ? stripDataUrl(b64) : b64;
-                    out.attachments.add(new BridgeService.Attachment("image-" + (i + 1) + ".png", "image/png", clean));
+                    out.attachments.add(new BridgeService.Attachment(
+                            "image-" + (i + 1) + ".png", "image/png", clean));
                 }
             }
         }
@@ -252,9 +226,13 @@ public class OllamaApiService {
                 else if (part.contains("/")) mime = part;
             }
             if (!isBase64 || data.isEmpty()) return null;
-            String ext = mime.contains("/") ? mime.substring(mime.indexOf('/') + 1) : "bin";
+            String ext = mime.contains("/")
+                    ? mime.substring(mime.indexOf('/') + 1)
+                    : "bin";
             return new BridgeService.Attachment(fallbackBase + "." + ext, mime, data);
-        } catch (Exception e) { return null; }
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     static String stripDataUrl(String s) {
@@ -295,6 +273,7 @@ public class OllamaApiService {
 
     static void handleRoot(HttpExchange ex) throws IOException {
         setCors(ex);
+        logIncomingRequest(ex, null);
         if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) { noContent(ex); return; }
         if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) { methodNotAllowed(ex); return; }
         byte[] body = "Ollama is running".getBytes(StandardCharsets.UTF_8);
@@ -306,6 +285,7 @@ public class OllamaApiService {
 
     static void handleVersion(HttpExchange ex) throws IOException {
         setCors(ex);
+        logIncomingRequest(ex, null);
         if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) { noContent(ex); return; }
         JSONObject o = new JSONObject();
         o.put("version", "0.1.0");
@@ -314,7 +294,9 @@ public class OllamaApiService {
 
     static void handleTags(HttpExchange ex) throws IOException {
         setCors(ex);
+        logIncomingRequest(ex, null);
         if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) { noContent(ex); return; }
+
         JSONObject model = new JSONObject();
         model.put("name", MODEL_NAME);
         model.put("model", MODEL_NAME);
@@ -337,6 +319,7 @@ public class OllamaApiService {
 
     static void handlePs(HttpExchange ex) throws IOException {
         setCors(ex);
+        logIncomingRequest(ex, null);
         if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) { noContent(ex); return; }
         JSONObject resp = new JSONObject();
         resp.put("models", new JSONArray());
@@ -348,8 +331,7 @@ public class OllamaApiService {
         if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) { noContent(ex); return; }
         if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) { methodNotAllowed(ex); return; }
 
-        String raw = readBody(ex);
-        logJsonBody("POST /api/chat", raw);
+        String raw = readBody(ex); // Логирование происходит внутри readBody
 
         JSONObject req;
         try { req = new JSONObject(raw); }
@@ -362,29 +344,20 @@ public class OllamaApiService {
                 JSONObject m = msgs.optJSONObject(i);
                 if (m != null && "user".equals(m.optString("role"))) userMsgCount++;
             }
-            if (userMsgCount <= 1 && Main.session.getHistorySize() > 0) {
-                Main.session.clearHistory();
+            if (userMsgCount <= 1 && session.getHistorySize() > 0) {
+                session.clearHistory();
                 BridgeService.sendNewChatFromStdin();
             }
         }
 
-        // --- НОВОЕ: Извлекаем и добавляем новый контекст ---
-        String newCtx = extractNewContext(req);
-
         UserInput ui = extractUserInput(req);
-        logUserInput("POST /api/chat", ui);
 
-        if (!ui.hasContent() && newCtx.isEmpty()) {
+        if (!ui.hasContent()) {
             writeError(ex, 400, "no user content (text or images) in 'messages'");
             return;
         }
 
-        // Внедряем новый контекст в начало текста
-        if (!newCtx.isEmpty()) {
-            ui.text = newCtx + ui.text;
-        }
-
-        Main.session.addMessage("user", ui.text);
+        session.addMessage("user", ui.text);
 
         boolean stream = req.optBoolean("stream", true);
         if (stream) handleChatStream(ex, ui);
@@ -398,7 +371,8 @@ public class OllamaApiService {
         OutputStream os = ex.getResponseBody();
 
         BridgeService.sendChatStream(ui.text, ui.attachments, new BridgeService.StreamListener() {
-            @Override public void onChunk(String text, String type) {
+            @Override
+            public void onChunk(String text, String type) {
                 if (!"RESPONSE".equals(type)) return;
                 JSONObject chunk = new JSONObject();
                 chunk.put("model", MODEL_NAME);
@@ -408,21 +382,32 @@ public class OllamaApiService {
                 msg.put("content", text);
                 chunk.put("message", msg);
                 chunk.put("done", false);
-                try { os.write((chunk.toString() + "\n").getBytes(StandardCharsets.UTF_8)); os.flush(); } catch (Exception ignored) {}
+                try {
+                    os.write((chunk.toString() + "\n").getBytes(StandardCharsets.UTF_8));
+                    os.flush();
+                } catch (Exception ignored) {}
             }
-            @Override public void onDone() {
+            @Override
+            public void onDone() {
                 JSONObject done = doneObject("");
-                try { os.write((done.toString() + "\n").getBytes(StandardCharsets.UTF_8)); } catch (Exception ignored) {}
+                try { os.write((done.toString() + "\n").getBytes(StandardCharsets.UTF_8)); }
+                catch (Exception ignored) {}
                 try { os.close(); } catch (Exception ignored) {}
             }
-            @Override public void onError(String message) { try { os.close(); } catch (Exception ignored) {} }
+            @Override
+            public void onError(String message) {
+                try { os.close(); } catch (Exception ignored) {}
+            }
         });
     }
 
     static void handleChatNonStream(HttpExchange ex, UserInput ui) {
         BridgeService.sendChat(ui.text, ui.attachments).whenComplete((fullText, err) -> {
             try {
-                if (err != null) { writeError(ex, 500, err.getMessage() == null ? "error" : err.getMessage()); return; }
+                if (err != null) {
+                    writeError(ex, 500, err.getMessage() == null ? "error" : err.getMessage());
+                    return;
+                }
                 JSONObject resp = doneObject(fullText);
                 byte[] b = resp.toString().getBytes(StandardCharsets.UTF_8);
                 ex.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
@@ -438,35 +423,43 @@ public class OllamaApiService {
         if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) { noContent(ex); return; }
         if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) { methodNotAllowed(ex); return; }
 
-        String raw = readBody(ex);
-        logJsonBody("POST /api/generate", raw);
+        String raw = readBody(ex); // Логирование внутри
 
         JSONObject req;
         try { req = new JSONObject(raw); }
         catch (Exception e) { writeError(ex, 400, "invalid json"); return; }
 
         UserInput ui = extractTopLevelInput(req);
-        logUserInput("POST /api/generate", ui);
 
-        if (!ui.hasContent()) { writeError(ex, 400, "empty 'prompt' and no 'images'"); return; }
+        if (!ui.hasContent()) {
+            writeError(ex, 400, "empty 'prompt' and no 'images'");
+            return;
+        }
 
         boolean stream = req.optBoolean("stream", true);
+
         if (stream) {
             ex.getResponseHeaders().set("Content-Type", "application/x-ndjson; charset=utf-8");
             ex.getResponseHeaders().set("Cache-Control", "no-cache");
             ex.sendResponseHeaders(200, 0);
             OutputStream os = ex.getResponseBody();
+
             BridgeService.sendChatStream(ui.text, ui.attachments, new BridgeService.StreamListener() {
-                @Override public void onChunk(String text, String type) {
+                @Override
+                public void onChunk(String text, String type) {
                     if (!"RESPONSE".equals(type)) return;
                     JSONObject chunk = new JSONObject();
                     chunk.put("model", MODEL_NAME);
                     chunk.put("created_at", nowIso());
                     chunk.put("response", text);
                     chunk.put("done", false);
-                    try { os.write((chunk.toString() + "\n").getBytes(StandardCharsets.UTF_8)); os.flush(); } catch (Exception ignored) {}
+                    try {
+                        os.write((chunk.toString() + "\n").getBytes(StandardCharsets.UTF_8));
+                        os.flush();
+                    } catch (Exception ignored) {}
                 }
-                @Override public void onDone() {
+                @Override
+                public void onDone() {
                     JSONObject done = new JSONObject();
                     done.put("model", MODEL_NAME);
                     done.put("created_at", nowIso());
@@ -476,15 +469,22 @@ public class OllamaApiService {
                     done.put("total_duration", 0);
                     done.put("prompt_eval_count", 0);
                     done.put("eval_count", 0);
-                    try { os.write((done.toString() + "\n").getBytes(StandardCharsets.UTF_8)); } catch (Exception ignored) {}
+                    try { os.write((done.toString() + "\n").getBytes(StandardCharsets.UTF_8)); }
+                    catch (Exception ignored) {}
                     try { os.close(); } catch (Exception ignored) {}
                 }
-                @Override public void onError(String message) { try { os.close(); } catch (Exception ignored) {} }
+                @Override
+                public void onError(String message) {
+                    try { os.close(); } catch (Exception ignored) {}
+                }
             });
         } else {
             BridgeService.sendChat(ui.text, ui.attachments).whenComplete((fullText, err) -> {
                 try {
-                    if (err != null) { writeError(ex, 500, err.getMessage() == null ? "error" : err.getMessage()); return; }
+                    if (err != null) {
+                        writeError(ex, 500, err.getMessage() == null ? "error" : err.getMessage());
+                        return;
+                    }
                     JSONObject resp = new JSONObject();
                     resp.put("model", MODEL_NAME);
                     resp.put("created_at", nowIso());
@@ -506,6 +506,7 @@ public class OllamaApiService {
 
     static void handleShow(HttpExchange ex) throws IOException {
         setCors(ex);
+        logIncomingRequest(ex, null); // POST, но без тела (или тело игнорируется)
         if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) { noContent(ex); return; }
         if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) { methodNotAllowed(ex); return; }
 
@@ -526,6 +527,7 @@ public class OllamaApiService {
         JSONObject info = new JSONObject();
         info.put("general.architecture", "deepseek");
         resp.put("model_info", info);
+
         writeJson(ex, 200, resp);
     }
 
@@ -535,7 +537,6 @@ public class OllamaApiService {
         if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) { methodNotAllowed(ex); return; }
 
         String raw = readBody(ex);
-        logJsonBody("POST /api/embed", raw);
 
         JSONObject req;
         try { req = new JSONObject(raw); }
@@ -548,7 +549,9 @@ public class OllamaApiService {
             else inputs.put(in);
         }
         JSONArray embeddings = new JSONArray();
-        for (int i = 0; i < inputs.length(); i++) { embeddings.put(new JSONArray().put(0.0)); }
+        for (int i = 0; i < inputs.length(); i++) {
+            embeddings.put(new JSONArray().put(0.0));
+        }
         JSONObject resp = new JSONObject();
         resp.put("model", MODEL_NAME);
         resp.put("embeddings", embeddings);
@@ -557,27 +560,32 @@ public class OllamaApiService {
 
     static void handlePull(HttpExchange ex) throws IOException {
         setCors(ex);
+        logIncomingRequest(ex, null);
         if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) { noContent(ex); return; }
         if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) { methodNotAllowed(ex); return; }
 
         ex.getResponseHeaders().set("Content-Type", "application/x-ndjson; charset=utf-8");
         ex.sendResponseHeaders(200, 0);
         OutputStream os = ex.getResponseBody();
+
         try {
             JSONObject start = new JSONObject();
             start.put("status", "pulling manifest");
             os.write((start.toString() + "\n").getBytes(StandardCharsets.UTF_8));
             os.flush();
+
             JSONObject ok = new JSONObject();
             ok.put("status", "success");
             os.write((ok.toString() + "\n").getBytes(StandardCharsets.UTF_8));
             os.flush();
         } catch (Exception ignored) {}
+
         try { os.close(); } catch (Exception ignored) {}
     }
 
     static void handlePush(HttpExchange ex) throws IOException {
         setCors(ex);
+        logIncomingRequest(ex, null);
         if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) { noContent(ex); return; }
         if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) { methodNotAllowed(ex); return; }
         JSONObject resp = new JSONObject();
@@ -587,6 +595,7 @@ public class OllamaApiService {
 
     static void handleCreate(HttpExchange ex) throws IOException {
         setCors(ex);
+        logIncomingRequest(ex, null);
         if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) { noContent(ex); return; }
         if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) { methodNotAllowed(ex); return; }
 
@@ -603,12 +612,14 @@ public class OllamaApiService {
 
     static void handleCopy(HttpExchange ex) throws IOException {
         setCors(ex);
+        logIncomingRequest(ex, null);
         if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) { noContent(ex); return; }
         writeError(ex, 404, "model copy not supported");
     }
 
     static void handleDelete(HttpExchange ex) throws IOException {
         setCors(ex);
+        logIncomingRequest(ex, null);
         if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) { noContent(ex); return; }
         JSONObject resp = new JSONObject();
         resp.put("status", "success");
@@ -621,8 +632,11 @@ public class OllamaApiService {
 
     static void handleV1(HttpExchange ex) throws IOException {
         setCors(ex);
+        logIncomingRequest(ex, null); // Логируем маршрут /v1/*
         if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) { noContent(ex); return; }
+
         String path = ex.getRequestURI().getPath();
+
         if ("/v1/models".equals(path)) {
             handleV1ModelsList(ex);
         } else if (path.startsWith("/v1/models/")) {
@@ -639,12 +653,15 @@ public class OllamaApiService {
     }
 
     static void handleV1ModelsList(HttpExchange ex) throws IOException {
+        logIncomingRequest(ex, null);
         if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) { methodNotAllowed(ex); return; }
+
         JSONObject m = new JSONObject();
         m.put("id", MODEL_NAME);
         m.put("object", "model");
         m.put("created", CREATED_EPOCH);
         m.put("owned_by", "miacomsoft");
+
         JSONObject resp = new JSONObject();
         resp.put("object", "list");
         resp.put("data", new JSONArray().put(m));
@@ -652,8 +669,12 @@ public class OllamaApiService {
     }
 
     static void handleV1ModelById(HttpExchange ex, String id) throws IOException {
+        logIncomingRequest(ex, null);
         if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) { methodNotAllowed(ex); return; }
-        if (!MODEL_NAME.equals(id)) { writeError(ex, 404, "model not found: " + id); return; }
+        if (!MODEL_NAME.equals(id)) {
+            writeError(ex, 404, "model not found: " + id);
+            return;
+        }
         JSONObject m = new JSONObject();
         m.put("id", MODEL_NAME);
         m.put("object", "model");
@@ -665,8 +686,7 @@ public class OllamaApiService {
     static void handleV1ChatCompletions(HttpExchange ex) throws IOException {
         if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) { methodNotAllowed(ex); return; }
 
-        String raw = readBody(ex);
-        logJsonBody("POST /v1/chat/completions", raw);
+        String raw = readBody(ex); // Логирование внутри
 
         JSONObject req;
         try { req = new JSONObject(raw); }
@@ -679,28 +699,20 @@ public class OllamaApiService {
                 JSONObject m = msgs.optJSONObject(i);
                 if (m != null && "user".equals(m.optString("role"))) userMsgCount++;
             }
-            if (userMsgCount <= 1 && Main.session.getHistorySize() > 0) {
-                Main.session.clearHistory();
+            if (userMsgCount <= 1 && session.getHistorySize() > 0) {
+                session.clearHistory();
                 BridgeService.sendNewChatFromStdin();
             }
         }
 
-        // --- НОВОЕ: Извлекаем и добавляем новый контекст ---
-        String newCtx = extractNewContext(req);
-
         UserInput ui = extractUserInput(req);
-        logUserInput("POST /v1/chat/completions", ui);
 
-        if (!ui.hasContent() && newCtx.isEmpty()) {
+        if (!ui.hasContent()) {
             writeError(ex, 400, "no user content (text or images) in 'messages'");
             return;
         }
 
-        if (!newCtx.isEmpty()) {
-            ui.text = newCtx + ui.text;
-        }
-
-        Main.session.addMessage("user", ui.text);
+        session.addMessage("user", ui.text);
 
         String model = req.optString("model", MODEL_NAME);
         if (model == null || model.isEmpty()) model = MODEL_NAME;
@@ -741,7 +753,8 @@ public class OllamaApiService {
         } catch (Exception ignored) {}
 
         BridgeService.sendChatStream(ui.text, ui.attachments, new BridgeService.StreamListener() {
-            @Override public void onChunk(String text, String type) {
+            @Override
+            public void onChunk(String text, String type) {
                 if (!"RESPONSE".equals(type)) return;
                 JSONObject chunk = new JSONObject();
                 chunk.put("id", id);
@@ -755,9 +768,13 @@ public class OllamaApiService {
                 choice.put("delta", delta);
                 choice.put("finish_reason", JSONObject.NULL);
                 chunk.put("choices", new JSONArray().put(choice));
-                try { os.write(("data: " + chunk.toString() + "\n\n").getBytes(StandardCharsets.UTF_8)); os.flush(); } catch (Exception ignored) {}
+                try {
+                    os.write(("data: " + chunk.toString() + "\n\n").getBytes(StandardCharsets.UTF_8));
+                    os.flush();
+                } catch (Exception ignored) {}
             }
-            @Override public void onDone() {
+            @Override
+            public void onDone() {
                 try {
                     JSONObject fin = new JSONObject();
                     fin.put("id", id);
@@ -775,7 +792,8 @@ public class OllamaApiService {
                 } catch (Exception ignored) {}
                 try { os.close(); } catch (Exception ignored) {}
             }
-            @Override public void onError(String message) {
+            @Override
+            public void onError(String message) {
                 try {
                     JSONObject err = new JSONObject();
                     err.put("error", new JSONObject().put("message", message));
@@ -792,27 +810,35 @@ public class OllamaApiService {
         final String modelName = (model == null || model.isEmpty()) ? MODEL_NAME : model;
         BridgeService.sendChat(ui.text, ui.attachments).whenComplete((fullText, err) -> {
             try {
-                if (err != null) { writeError(ex, 500, err.getMessage() == null ? "error" : err.getMessage()); return; }
+                if (err != null) {
+                    writeError(ex, 500, err.getMessage() == null ? "error" : err.getMessage());
+                    return;
+                }
                 String id = "chatcmpl-" + UUID.randomUUID().toString().replace("-", "").substring(0, 24);
                 long created = Instant.now().getEpochSecond();
+
                 JSONObject resp = new JSONObject();
                 resp.put("id", id);
                 resp.put("object", "chat.completion");
                 resp.put("created", created);
                 resp.put("model", modelName);
+
                 JSONObject msg = new JSONObject();
                 msg.put("role", "assistant");
                 msg.put("content", fullText == null ? "" : fullText);
+
                 JSONObject choice = new JSONObject();
                 choice.put("index", 0);
                 choice.put("message", msg);
                 choice.put("finish_reason", "stop");
                 resp.put("choices", new JSONArray().put(choice));
+
                 JSONObject usage = new JSONObject();
                 usage.put("prompt_tokens", 0);
                 usage.put("completion_tokens", 0);
                 usage.put("total_tokens", 0);
                 resp.put("usage", usage);
+
                 byte[] b = resp.toString().getBytes(StandardCharsets.UTF_8);
                 ex.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
                 ex.sendResponseHeaders(200, b.length);
@@ -824,18 +850,20 @@ public class OllamaApiService {
 
     static void handleV1Completions(HttpExchange ex) throws IOException {
         if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) { methodNotAllowed(ex); return; }
+
         String raw = readBody(ex);
-        logJsonBody("POST /v1/completions", raw);
+
         JSONObject req;
         try { req = new JSONObject(raw); }
         catch (Exception e) { writeError(ex, 400, "invalid json"); return; }
 
         UserInput ui = extractTopLevelInput(req);
-        logUserInput("POST /v1/completions", ui);
+
         if (!ui.hasContent()) { writeError(ex, 400, "empty 'prompt' and no 'images'"); return; }
 
         String model = req.optString("model", MODEL_NAME);
         if (model == null || model.isEmpty()) model = MODEL_NAME;
+
         boolean stream = req.optBoolean("stream", false);
         final String modelName = model;
 
@@ -844,24 +872,31 @@ public class OllamaApiService {
         } else {
             BridgeService.sendChat(ui.text, ui.attachments).whenComplete((fullText, err) -> {
                 try {
-                    if (err != null) { writeError(ex, 500, err.getMessage() == null ? "error" : err.getMessage()); return; }
+                    if (err != null) {
+                        writeError(ex, 500, err.getMessage() == null ? "error" : err.getMessage());
+                        return;
+                    }
                     String id = "cmpl-" + UUID.randomUUID().toString().replace("-", "").substring(0, 24);
                     long created = Instant.now().getEpochSecond();
+
                     JSONObject resp = new JSONObject();
                     resp.put("id", id);
                     resp.put("object", "text_completion");
                     resp.put("created", created);
                     resp.put("model", modelName);
+
                     JSONObject choice = new JSONObject();
                     choice.put("index", 0);
                     choice.put("text", fullText == null ? "" : fullText);
                     choice.put("finish_reason", "stop");
                     resp.put("choices", new JSONArray().put(choice));
+
                     JSONObject usage = new JSONObject();
                     usage.put("prompt_tokens", 0);
                     usage.put("completion_tokens", 0);
                     usage.put("total_tokens", 0);
                     resp.put("usage", usage);
+
                     byte[] b = resp.toString().getBytes(StandardCharsets.UTF_8);
                     ex.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
                     ex.sendResponseHeaders(200, b.length);
@@ -885,7 +920,8 @@ public class OllamaApiService {
         final String modelName = model;
 
         BridgeService.sendChatStream(ui.text, ui.attachments, new BridgeService.StreamListener() {
-            @Override public void onChunk(String text, String type) {
+            @Override
+            public void onChunk(String text, String type) {
                 if (!"RESPONSE".equals(type)) return;
                 JSONObject chunk = new JSONObject();
                 chunk.put("id", id);
@@ -897,9 +933,13 @@ public class OllamaApiService {
                 choice.put("text", text);
                 choice.put("finish_reason", JSONObject.NULL);
                 chunk.put("choices", new JSONArray().put(choice));
-                try { os.write(("data: " + chunk.toString() + "\n\n").getBytes(StandardCharsets.UTF_8)); os.flush(); } catch (Exception ignored) {}
+                try {
+                    os.write(("data: " + chunk.toString() + "\n\n").getBytes(StandardCharsets.UTF_8));
+                    os.flush();
+                } catch (Exception ignored) {}
             }
-            @Override public void onDone() {
+            @Override
+            public void onDone() {
                 try {
                     JSONObject fin = new JSONObject();
                     fin.put("id", id);
@@ -917,7 +957,8 @@ public class OllamaApiService {
                 } catch (Exception ignored) {}
                 try { os.close(); } catch (Exception ignored) {}
             }
-            @Override public void onError(String message) {
+            @Override
+            public void onError(String message) {
                 try {
                     JSONObject err = new JSONObject();
                     err.put("error", new JSONObject().put("message", message));
@@ -936,8 +977,9 @@ public class OllamaApiService {
 
     static void handleV1Embeddings(HttpExchange ex) throws IOException {
         if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) { methodNotAllowed(ex); return; }
+
         String raw = readBody(ex);
-        logJsonBody("POST /v1/embeddings", raw);
+
         JSONObject req;
         try { req = new JSONObject(raw); }
         catch (Exception e) { writeError(ex, 400, "invalid json"); return; }
@@ -962,6 +1004,7 @@ public class OllamaApiService {
         JSONObject usage = new JSONObject();
         usage.put("prompt_tokens", 0);
         usage.put("total_tokens", 0);
+
         JSONObject resp = new JSONObject();
         resp.put("object", "list");
         resp.put("data", data);
@@ -986,12 +1029,8 @@ public class OllamaApiService {
         return resp;
     }
 
-    static String nowIso() { return Instant.now().toString(); }
-
-    static String readBody(HttpExchange ex) throws IOException {
-        try (InputStream is = ex.getRequestBody()) {
-            return new String(is.readAllBytes(), StandardCharsets.UTF_8);
-        }
+    static String nowIso() {
+        return Instant.now().toString();
     }
 
     static void setCors(HttpExchange ex) {

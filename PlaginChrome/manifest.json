@@ -3,12 +3,8 @@
   "name": "DeepSeek Stream Interceptor",
   "version": "1.5.0",
   "description": "Перехват стрима DeepSeek + мост EventSource + эмуляция Ollama API.",
-  "permissions": ["storage"],
-  "host_permissions": [
-    "https://chat.deepseek.com/*",
-    "http://localhost:11434/*",
-    "http://127.0.0.1:11434/*"
-  ],
+  "permissions": ["tabs", "scripting", "storage"],
+  "host_permissions": ["https://chat.deepseek.com/*"],
   "content_scripts": [
     {
       "matches": ["https://chat.deepseek.com/*"],

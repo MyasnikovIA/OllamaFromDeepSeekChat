@@ -16,9 +16,7 @@
   const EVT_MODE_STATE  = "__ds_mode_state__";
   const EVT_TOKEN_LIMIT = "__ds_token_limit__";
 
-  // ИЗМЕНЕНО: Порт 11434
   const SERVER     = "http://127.0.0.1:11434";
-
   const RECONNECT_MS = 5000;
 
   let postQueue = Promise.resolve();
@@ -37,7 +35,29 @@
     return postQueue;
   }
 
-  // ---------- НОВОЕ: уведомление сервера о закрытии вкладки ----------
+  // ============================================================
+  //  НОВОЕ: надёжная отправка tab-op лога даже при закрытии вкладки
+  // ============================================================
+  function postTabOp(text) {
+    try {
+      const body = JSON.stringify({ level: "tab-op", text, tabId: TAB_ID });
+      if (navigator.sendBeacon) {
+        const ok = navigator.sendBeacon(
+            SERVER + "/log",
+            new Blob([body], { type: "application/json" })
+        );
+        if (ok) return;
+      }
+      fetch(SERVER + "/log", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+        keepalive: true
+      }).catch(() => {});
+    } catch (_) {}
+  }
+
+  // ---------- уведомление сервера о закрытии вкладки ----------
   let byeSent = false;
   function sendBye(reason) {
     if (byeSent) return;
@@ -49,7 +69,6 @@
         reason: reason || "pagehide",
         text:   reason || "pagehide"
       });
-      // sendBeacon гарантированно доставляется даже при закрытии вкладки
       if (navigator.sendBeacon) {
         const ok = navigator.sendBeacon(
             SERVER + "/log",
@@ -57,7 +76,6 @@
         );
         if (ok) return;
       }
-      // fallback: keepalive-fetch (поддерживается современным Chrome)
       fetch(SERVER + "/log", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -75,12 +93,11 @@
     sendBye("beforeunload");
   }, { capture: true });
 
-  // на случай выгрузки SPA-страницы без pagehide (крайне редко)
   window.addEventListener("unload", () => {
     sendBye("unload");
   }, { capture: true });
 
-  // ---------- дальше без изменений ----------
+  // ---------- стримы (без изменений) ----------
   const streams = new Map();
 
   function getStream(streamId) {
@@ -244,6 +261,90 @@
   window.addEventListener(EVT_READY, flushPending);
   setTimeout(() => { if (!ready) flushPending(); }, 1000);
 
+  // ============================================================
+  //  НОВОЕ: регистрация с background для управления вкладками
+  // ============================================================
+  function registerWithBackground() {
+    try {
+      chrome.runtime.sendMessage(
+          { type: "register_tab", tabId: TAB_ID },
+          (_resp) => { /* lastError игнорируем */ }
+      );
+    } catch (_) {}
+  }
+  registerWithBackground();
+  // service worker в MV3 может «засыпать» — периодически напоминаем о себе
+  setInterval(registerWithBackground, 30000);
+
+  // ============================================================
+  //  НОВОЕ: обработчик команд управления вкладками
+  // ============================================================
+  function handleTabCommand(cmd) {
+    const type = cmd && cmd.type;
+
+    if (type === "openTab") {
+      const url = (cmd.url && String(cmd.url).trim()) || "https://chat.deepseek.com/";
+      const active = cmd.active !== false;
+      try {
+        chrome.runtime.sendMessage({ type: "open_tab", url, active }, (resp) => {
+          if (chrome.runtime.lastError) {
+            postTabOp("openTab failed: " + chrome.runtime.lastError.message);
+            return;
+          }
+          if (resp && resp.ok) {
+            postTabOp("opened tab (chrome " + resp.chromeTabId + "): " + url);
+          } else {
+            postTabOp("openTab error: " + (resp && resp.error || "unknown"));
+          }
+        });
+      } catch (e) {
+        postTabOp("openTab exception: " + e.message);
+      }
+      return;
+    }
+
+    if (type === "closeTab") {
+      const target = cmd.tabId || "";
+      if (!target) {
+        postTabOp("closeTab: empty tabId");
+        return;
+      }
+      // Сразу сообщаем Java (если закрываем себя — успеем до unload)
+      postTabOp("closing: " + target);
+      try {
+        chrome.runtime.sendMessage({ type: "close_tab", tabId: target }, (resp) => {
+          if (chrome.runtime.lastError) return; // себя закрыли — колбэк может не сработать
+          if (resp && resp.ok) {
+            // успешное закрытие уже отрапортовано выше
+          } else {
+            postTabOp("closeTab error: " + (resp && resp.error || "unknown"));
+          }
+        });
+      } catch (e) {
+        postTabOp("closeTab exception: " + e.message);
+      }
+      return;
+    }
+
+    if (type === "closeAllTabs") {
+      postTabOp("closing all deepseek tabs...");
+      try {
+        chrome.runtime.sendMessage({ type: "close_all_deepseek" }, (resp) => {
+          if (chrome.runtime.lastError) return;
+          if (resp && resp.ok) {
+            postTabOp("closed " + (resp.closed || 0) + " deepseek tab(s)");
+          } else {
+            postTabOp("closeAllTabs error: " + (resp && resp.error || "unknown"));
+          }
+        });
+      } catch (e) {
+        postTabOp("closeAllTabs exception: " + e.message);
+      }
+      return;
+    }
+  }
+
+  // ---------- SSE ----------
   let es = null;
   let reconnectTimer = null;
 
@@ -252,7 +353,6 @@
       url: location.href,
       ua: navigator.userAgent
     }));
-    // попросить injected.js отдать текущие режимы
     dispatchToMain({ type: "getState" });
   }
   function scheduleReconnect() {
@@ -290,11 +390,22 @@
     es.onmessage = (e) => {
       let data = e.data;
       try { data = JSON.parse(data); } catch (_) {}
+
+      // НОВОЕ: команды управления вкладками обрабатываем сразу,
+      // не дожидаясь готовности injected.js и не передавая в него
+      if (data && typeof data === "object" && (
+          data.type === "openTab" ||
+          data.type === "closeTab" ||
+          data.type === "closeAllTabs"
+      )) {
+        handleTabCommand(data);
+        return;
+      }
+
       if (!ready) { pendingCmds.push(data); return; }
       dispatchToMain(data);
     };
   }
-
 
   connectSSE();
 
