@@ -7,12 +7,13 @@
     connectUrl:     document.getElementById("connect-url"),
     connectBtn:     document.getElementById("connect-btn"),
     connectStatus:  document.getElementById("connect-status"),
-    browsersList:   document.getElementById("browsers-list"),
+
     newChatBtn:     document.getElementById("new-chat-btn"),
     newChatTopBtn:  document.getElementById("new-chat-btn-top"),
     refreshTabsBtn: document.getElementById("refresh-tabs-btn"),
     changeServerBtn: document.getElementById("change-server-btn"),
     tabsList:       document.getElementById("tabs-list"),
+    browsersList:   document.getElementById("browsers-list"),
 
     thinkToggle:    document.getElementById("mode-think"),
     searchToggle:   document.getElementById("mode-search"),
@@ -33,51 +34,15 @@
     api: null,
     activeTabId: null,
     tabs: [],
+    browsers: [],
     modes: { thinking: false, smartSearch: false },
     chat: null,
-    browsers: [],
     pollTimer: null,
     tabContainers: {},
     tabControllers: {}
   };
-async function enterChat() {
-    UI.hide(els.connectScreen);
-    UI.show(els.chatScreen);
 
-    bindChatEvents();
-    bindModes();
-    bindSidebar();
-
-    await refreshAll();
-    await refreshBrowsers(); // NEW
-    startPolling();
-  }
-
-  // NEW: функция загрузки списка браузеров
-  async function refreshBrowsers() {
-    if (!state.api) return;
-    try {
-      state.browsers = await state.api.browsers();
-      renderBrowsers();
-    } catch (e) {
-      console.warn("Failed to fetch browsers:", e);
-    }
-  }
-
-  // NEW: отрисовка списка браузеров
-  function renderBrowsers() {
-    UI.renderBrowsers(els.browsersList, state.browsers, async (index) => {
-      try {
-        await state.api.openBrowser(index);
-        // Ждем немного, чтобы сервер успел запустить Chrome
-        setTimeout(() => refreshAll().catch(() => {}), 3000);
-      } catch (e) {
-        alert("Ошибка запуска браузера: " + e.message);
-      }
-    });
-  }
   function initConnectScreen() {
-    // Показываем экран подключения только если нет сохраненного URL
     const saved = window.DSConfig.getBaseUrl();
     if (saved) {
       els.connectUrl.value = saved;
@@ -97,7 +62,6 @@ async function enterChat() {
       state.api = api;
       enterChat();
     } catch (_) {
-      // Если не удалось подключиться к сохраненному — показываем экран
       UI.show(els.connectScreen);
     }
   }
@@ -112,15 +76,12 @@ async function enterChat() {
     try {
       const api = new window.BridgeApi(url);
       await api.ping();
-
       window.DSConfig.setBaseUrl(url);
       state.api = api;
-
       setConnectStatus("OK", false);
       UI.hide(els.connectScreen);
 
       if (isChange) {
-        // Полная перезагрузка страницы для сброса состояния истории
         window.location.reload();
       } else {
         enterChat();
@@ -156,26 +117,45 @@ async function enterChat() {
     state.pollTimer = setInterval(() => { refreshAll().catch(() => {}); }, 5000);
   }
 
-  async function refreshBrowsers() {
-    if (!state.api) return;
-    try {
-      const list = await state.api.browsers();
-      state.browsers = list; // сохранить, если понадобится для UI
-    } catch (e) {
-      console.warn("Failed to fetch browsers:", e);
-    }
-  }
-
-async function refreshAll() {
+  async function refreshAll() {
     if (!state.api) return;
     try {
       const tabs = await state.api.tabs();
       state.tabs = tabs;
 
-      // ... (ваша логика обновления вкладок) ...
+      if (!state.activeTabId) {
+        const selected = tabs.find(t => t.selected) || tabs[0];
+        if (selected) state.activeTabId = selected.tabId;
+      }
+      if (state.activeTabId && !tabs.some(t => t.tabId === state.activeTabId)) {
+        state.activeTabId = tabs[0] ? tabs[0].tabId : null;
+      }
+
+      if (state.activeTabId) {
+        const current = tabs.find(t => t.tabId === state.activeTabId);
+        if (current && !current.selected) {
+          try { await state.api.selectTab(state.activeTabId); } catch (_) {}
+        }
+      }
+
+      if (state.activeTabId) {
+        try {
+          const st = await state.api.state();
+          if (st && st.active) {
+            state.modes.thinking    = !!st.active.thinking;
+            state.modes.smartSearch = !!st.active.smartSearch;
+          } else {
+            state.modes.thinking = false;
+            state.modes.smartSearch = false;
+          }
+        } catch (_) {}
+      } else {
+        state.modes.thinking = false;
+        state.modes.smartSearch = false;
+      }
 
       renderTabs();
-      renderBrowsers(); // NEW: обновляем список браузеров
+      renderBrowsers();
       renderModes();
       renderStatus(true);
 
@@ -188,8 +168,27 @@ async function refreshAll() {
     }
   }
 
+  async function refreshBrowsers() {
+    if (!state.api) return;
+    try {
+      state.browsers = await state.api.browsers();
+      renderBrowsers();
+    } catch (e) {
+      console.warn("Failed to fetch browsers:", e);
+    }
+  }
+
   function renderTabs() {
-    UI.renderTabs(els.tabsList, state.tabs, state.activeTabId, selectAndRefresh);
+    UI.renderTabs(els.tabsList, state.tabs, state.activeTabId, selectAndRefresh, async (tabId) => {
+      // Закрытие вкладки
+      try {
+        await state.api.cmd("closeTab", { tabId });
+        // После закрытия ждем обновления
+        setTimeout(() => refreshAll().catch(() => {}), 1000);
+      } catch (e) {
+        alert("Ошибка закрытия вкладки: " + e.message);
+      }
+    });
 
     if (state.activeTabId) {
       const t = state.tabs.find(x => x.tabId === state.activeTabId);
@@ -201,6 +200,18 @@ async function refreshAll() {
       els.chatTitle.textContent = "Чат";
       els.chatSubtitle.textContent = "нет активной вкладки";
     }
+  }
+
+  function renderBrowsers() {
+    UI.renderBrowsers(els.browsersList, state.browsers, async (index) => {
+      try {
+        await state.api.openBrowser(index);
+        // Ждем, пока сервер запустит Chrome
+        setTimeout(() => refreshAll().catch(() => {}), 3000);
+      } catch (e) {
+        alert("Ошибка запуска браузера: " + e.message);
+      }
+    });
   }
 
   function renderModes() {
@@ -236,7 +247,6 @@ async function refreshAll() {
     if (!state.tabContainers[tabId]) {
       const div = document.createElement("div");
       div.className = "messages";
-      // Внутри создаем пустое состояние (оно нам нужно как отдельный div)
       const empty = document.createElement("div");
       empty.className = "empty-state";
       empty.innerHTML = `
@@ -249,7 +259,6 @@ async function refreshAll() {
       els.messagesContainer.appendChild(div);
       state.tabContainers[tabId] = div;
 
-      // Передаем div как сам контейнер сообщений и empty как пустое состояние
       state.tabControllers[tabId] = new window.ChatController(state.api, {
         messages: div,
         emptyState: empty,
@@ -341,7 +350,7 @@ async function refreshAll() {
     if (els.changeServerBtn) {
       els.changeServerBtn.addEventListener("click", () => {
         UI.show(els.connectScreen);
-        els.connectBtn.onclick = () => connect(true); // перезагрузка при смене
+        els.connectBtn.onclick = () => connect(true);
       });
     }
   }

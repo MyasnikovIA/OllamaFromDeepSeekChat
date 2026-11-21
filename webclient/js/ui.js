@@ -14,15 +14,10 @@
 
       const el = document.createElement("div");
       el.className = "message " + kind;
-
-      // Если это размышление — добавляем класс
-      if (kind === "thought") {
-          el.classList.add("thought");
-      }
+      if (kind === "thought") el.classList.add("thought");
 
       el.innerHTML = this.formatMessageText(text);
 
-      // Кнопка копирования
       const copyBtn = document.createElement("button");
       copyBtn.className = "copy-btn";
       copyBtn.innerHTML = "📋";
@@ -49,19 +44,16 @@
 
     formatMessageText(text) {
       const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-
       const blocks = [];
       let s = String(text).replace(/```([\s\S]*?)```/g, (_, code) => {
         blocks.push(code);
         return "\u0000B" + (blocks.length - 1) + "\u0000";
       });
-
       s = esc(s);
       s = s.replace(/`([^`\n]+)`/g, (_, c) => '<span class="msg-inline-code">' + c + "</span>");
       s = s.replace(/\u0000B(\d+)\u0000/g, (_, i) => {
         return '<span class="msg-code">' + esc(blocks[Number(i)]) + "</span>";
       });
-
       return s;
     },
 
@@ -84,7 +76,7 @@
       return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     },
 
-    renderTabs(listEl, tabs, activeTabId, onSelect) {
+    renderTabs(listEl, tabs, activeTabId, onSelect, onClose) {
       listEl.innerHTML = "";
       if (!tabs || tabs.length === 0) {
         const empty = document.createElement("li");
@@ -125,27 +117,24 @@
 
         li.appendChild(avatar);
         li.appendChild(meta);
-        li.title = t.tabId + (t.info ? "\n" + t.info : "");
 
+        // Кнопка закрытия (крестик)
+        const closeBtn = document.createElement("button");
+        closeBtn.className = "close-tab-btn";
+        closeBtn.innerHTML = "✕";
+        closeBtn.title = "Закрыть вкладку";
+        closeBtn.onclick = (e) => {
+            e.stopPropagation(); // Предотвращаем выбор вкладки
+            onClose(t.tabId);
+        };
+        li.appendChild(closeBtn);
+
+        li.title = t.tabId + (t.info ? "\n" + t.info : "");
         li.addEventListener("click", () => onSelect(t.tabId));
         listEl.appendChild(li);
       });
     },
 
-    _flag(icon, on) {
-      const s = document.createElement("span");
-      s.className = "tab-flag " + (on ? "on" : "off");
-      s.textContent = icon;
-      return s;
-    },
-
-    setStatus(pillEl, ok, text) {
-      if (!pillEl) return;
-      pillEl.classList.toggle("ok", !!ok);
-      pillEl.classList.toggle("err", !ok);
-      const t = pillEl.querySelector(".status-text");
-      if (t) t.textContent = text;
-    },
     renderBrowsers(listEl, browsers, onSelect) {
       listEl.innerHTML = "";
       if (!browsers || browsers.length === 0) {
@@ -163,7 +152,7 @@
 
         const avatar = document.createElement("div");
         avatar.className = "tab-avatar";
-        avatar.textContent = "🌐"; // Иконка браузера
+        avatar.textContent = "🌐";
 
         const meta = document.createElement("div");
         meta.className = "tab-meta";
@@ -189,6 +178,22 @@
         listEl.appendChild(li);
       });
     },
+
+    _flag(icon, on) {
+      const s = document.createElement("span");
+      s.className = "tab-flag " + (on ? "on" : "off");
+      s.textContent = icon;
+      return s;
+    },
+
+    setStatus(pillEl, ok, text) {
+      if (!pillEl) return;
+      pillEl.classList.toggle("ok", !!ok);
+      pillEl.classList.toggle("err", !ok);
+      const t = pillEl.querySelector(".status-text");
+      if (t) t.textContent = text;
+    },
+
     setModeCheckboxes(thinkEl, searchEl, { thinking, smartSearch }) {
       if (thinkEl)  thinkEl.checked  = !!thinking;
       if (searchEl) searchEl.checked = !!smartSearch;

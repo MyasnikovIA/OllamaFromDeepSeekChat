@@ -8,30 +8,19 @@
 </head>
 <body>
 
-<!-- ======================= ЭКРАН ПОДКЛЮЧЕНИЯ ======================= -->
 <div id="connect-screen" class="screen hidden">
     <div class="connect-card">
         <div class="connect-logo">🌉</div>
         <h1>DeepSeek Bridge</h1>
         <p class="connect-sub">Подключение к локальному серверу bridge</p>
-
         <label class="connect-label">URL сервера</label>
         <input id="connect-url" type="text" value="http://localhost:11434" spellcheck="false">
-
         <button id="connect-btn" class="btn btn-primary btn-block">Подключиться</button>
         <div id="connect-status" class="connect-status"></div>
-
-        <div class="connect-hint">
-            Запустите <code>FakeOllamaFromDeepSeekChat</code>, откройте вкладку
-            <code>https://chat.deepseek.com/</code> с установленным расширением.
-        </div>
     </div>
 </div>
 
-<!-- ======================= ОСНОВНОЙ ЭКРАН ======================= -->
 <div id="chat-screen" class="screen hidden">
-
-    <!-- ---------- Сайдбар ---------- -->
     <aside class="sidebar">
         <div class="sidebar-header">
             <div class="brand">
@@ -41,13 +30,11 @@
             <button id="new-chat-btn" class="btn-icon" title="Новый чат">＋</button>
         </div>
 
-        <!-- Блок браузеров -->
         <div class="sidebar-section">
             <div class="sidebar-title">Браузеры</div>
             <ul id="browsers-list" class="tabs-list"></ul>
         </div>
 
-        <!-- Блок вкладок -->
         <div class="sidebar-section">
             <div class="sidebar-title">
                 Вкладки
@@ -81,7 +68,6 @@
         </div>
     </aside>
 
-    <!-- ---------- Основная область чата ---------- -->
     <main class="main">
         <header class="chat-header">
             <div class="chat-header-info">
@@ -91,19 +77,14 @@
             <button id="new-chat-btn-top" class="btn-header" title="Новый чат">＋ Новый чат</button>
         </header>
 
-        <!-- Контейнер для сообщений текущей вкладки -->
-        <div id="messages-container">
-            <!-- Сюда JS будет вставлять блоки .messages -->
-        </div>
+        <div id="messages-container"></div>
 
         <footer class="composer">
             <button id="stop-btn" class="btn-stop hidden" title="Остановить">■</button>
-            <textarea id="composer-input" rows="1"
-                      placeholder="Сообщение для DeepSeek… (Enter — отправить, Shift+Enter — перенос)"></textarea>
+            <textarea id="composer-input" rows="1" placeholder="Сообщение для DeepSeek… (Enter — отправить, Shift+Enter — перенос)"></textarea>
             <button id="send-btn" class="btn-send" title="Отправить">➤</button>
         </footer>
     </main>
-
 </div>
 
 <script src="js/config.js"></script>

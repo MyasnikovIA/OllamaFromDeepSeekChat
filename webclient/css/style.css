@@ -11,7 +11,7 @@
   --bg-composer:    #f0f2f5;
   --bg-hover:       #f5f6f6;
   --bg-active:      #e9edef;
-  --bg-thought:     #f9f9f9; /* Светлый фон для размышлений */
+  --bg-thought:     #f9f9f9;
 
   --text-primary:   #111b21;
   --text-secondary: #667781;
@@ -199,10 +199,12 @@ input, textarea { font-family: inherit; }
 .btn-icon:hover { background: var(--bg-hover); color: var(--text-primary); }
 .btn-icon-sm { width: 24px; height: 24px; font-size: 14px; }
 
+/* ---------- Списки (вкладки и браузеры) ---------- */
 .tabs-list { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow-y: auto; }
 .tab-item {
   display: flex; align-items: center; gap: 10px; padding: 10px 20px;
   cursor: pointer; transition: background .12s; border-left: 3px solid transparent;
+  position: relative; /* Для абсолютного позиционирования крестика */
 }
 .tab-item.browser-item {
   cursor: pointer;
@@ -229,6 +231,30 @@ input, textarea { font-family: inherit; }
 
 .tab-empty { padding: 14px 20px; color: var(--text-muted); font-size: 12px; font-style: italic; }
 
+/* ---------- Кнопка закрытия вкладки ---------- */
+.close-tab-btn {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 16px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s, color 0.2s;
+  padding: 4px;
+  line-height: 1;
+}
+.tab-item:hover .close-tab-btn {
+  opacity: 1;
+}
+.close-tab-btn:hover {
+  color: var(--red);
+}
+
+/* ---------- Режимы ---------- */
 .modes { padding: 0 20px 12px; }
 .mode-toggle { display: flex; align-items: center; gap: 12px; padding: 8px 0; cursor: pointer; user-select: none; }
 .mode-toggle input { display: none; }
@@ -261,7 +287,7 @@ input, textarea { font-family: inherit; }
 .chat-header {
   display: flex; align-items: center; justify-content: space-between;
   padding: 12px 20px; background: var(--bg-header); border-bottom: 1px solid var(--border);
-  flex-shrink: 0; /* Шапка не сжимается */
+  flex-shrink: 0;
   z-index: 10;
 }
 .chat-header-info { min-width: 0; }
@@ -277,9 +303,9 @@ input, textarea { font-family: inherit; }
 
 /* ---------- Сообщения ---------- */
 #messages-container {
-  flex: 1; /* Занимает всё свободное место */
+  flex: 1;
   position: relative;
-  overflow: hidden; /* Внутри скроллится только .messages */
+  overflow: hidden;
 }
 
 .messages {
@@ -332,7 +358,6 @@ input, textarea { font-family: inherit; }
 .message.system   { align-self: center; background: #ffe9b8; color: #7a5c00; font-size: 12px; text-align: center; box-shadow: none; }
 .message.error    { align-self: center; background: #ffe0dd; color: #a3180d; font-size: 12px; text-align: center; box-shadow: none; }
 
-/* Стиль для Thought (Размышлений) */
 .message.thought {
   background-color: var(--bg-thought);
   color: var(--text-thought);
@@ -350,7 +375,6 @@ input, textarea { font-family: inherit; }
 .message.typing::after { content: "▍"; color: var(--text-muted); animation: blink 1s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 
-/* Кнопка копирования */
 .copy-btn {
   background: none;
   border: none;
@@ -364,7 +388,7 @@ input, textarea { font-family: inherit; }
   top: 8px;
   right: 8px;
 }
-.message:hover .copy-btn, .message:hover .copy-btn { opacity: 1; }
+.message:hover .copy-btn { opacity: 1; }
 .message.outgoing .copy-btn { right: auto; left: 8px; }
 .copy-btn:hover { color: var(--green); }
 
