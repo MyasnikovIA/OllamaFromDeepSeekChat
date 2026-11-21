@@ -1,5 +1,6 @@
 package ru.miacomsoft.config;
 
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -7,6 +8,9 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -44,9 +48,11 @@ public final class Config {
     private final int     consoleWidth;
     private final boolean debug;
     private final String  extensionDir;
-    private final String  profileDir;
     private final String  deepseekUrl;
     private final String  modelName;
+    private final List<BrowserConfig> browsers;
+    private final String  mailClientUrl;
+    private final String  mailAdminUrl;
 
     private Config(int port,
                    long watchdogTimeoutMs,
@@ -55,9 +61,11 @@ public final class Config {
                    int consoleWidth,
                    boolean debug,
                    String extensionDir,
-                   String profileDir,
                    String deepseekUrl,
-                   String modelName) {
+                   String modelName,
+                   List<BrowserConfig> browsers,
+                   String mailClientUrl,
+                   String mailAdminUrl) {
         this.port              = port;
         this.watchdogTimeoutMs = watchdogTimeoutMs;
         this.maxFileBytes      = maxFileBytes;
@@ -65,9 +73,11 @@ public final class Config {
         this.consoleWidth      = consoleWidth;
         this.debug             = debug;
         this.extensionDir      = extensionDir;
-        this.profileDir        = profileDir;
         this.deepseekUrl       = deepseekUrl;
         this.modelName         = modelName;
+        this.browsers          = Collections.unmodifiableList(browsers);
+        this.mailClientUrl     = mailClientUrl;
+        this.mailAdminUrl      = mailAdminUrl;
     }
 
     // ---- getters ----
@@ -78,9 +88,11 @@ public final class Config {
     public int     getConsoleWidth()      { return consoleWidth; }
     public boolean isDebug()              { return debug; }
     public String  getExtensionDir()      { return extensionDir; }
-    public String  getProfileDir()        { return profileDir; }
     public String  getDeepseekUrl()       { return deepseekUrl; }
     public String  getModelName()         { return modelName; }
+    public List<BrowserConfig> getBrowsers() { return browsers; }
+    public String  getMailClientUrl()     { return mailClientUrl; }
+    public String  getMailAdminUrl()      { return mailAdminUrl; }
 
     // ---- singleton ----
     public static Config get() {
@@ -106,9 +118,11 @@ public final class Config {
                 DEFAULT_CONSOLE_WIDTH,
                 DEFAULT_DEBUG,
                 null,
-                null,
                 DEFAULT_DEEPSEEK_URL,
-                DEFAULT_MODEL_NAME);
+                DEFAULT_MODEL_NAME,
+                new ArrayList<>(),
+                null,
+                null);
     }
 
     // ============================================================
@@ -138,7 +152,8 @@ public final class Config {
         System.out.println("[CONFIG] loaded: " + file.getAbsolutePath()
                 + " (port=" + cfg.port
                 + ", model=" + cfg.modelName
-                + ", debug=" + cfg.debug + ")");
+                + ", debug=" + cfg.debug
+                + ", browsers=" + cfg.browsers.size() + ")");
         return cfg;
     }
 
@@ -150,9 +165,10 @@ public final class Config {
         int     width      = json.optInt("consoleWidth", DEFAULT_CONSOLE_WIDTH);
         boolean debug      = json.optBoolean("debug", DEFAULT_DEBUG);
         String  extDir     = json.isNull("extensionDir") ? null : json.optString("extensionDir", null);
-        String  profileDir = json.isNull("profileDir")   ? null : json.optString("profileDir", null);
         String  url        = json.optString("deepseekUrl", DEFAULT_DEEPSEEK_URL);
         String  model      = json.optString("modelName", DEFAULT_MODEL_NAME);
+        String  mailClient = json.isNull("mailClientUrl") ? null : json.optString("mailClientUrl", null);
+        String  mailAdmin  = json.isNull("mailAdminUrl")  ? null : json.optString("mailAdminUrl",  null);
 
         if (port <= 0 || port > 65535) port = DEFAULT_PORT;
         if (width < 40) width = DEFAULT_CONSOLE_WIDTH;
@@ -162,8 +178,26 @@ public final class Config {
         if (url   == null || url.isEmpty())   url   = DEFAULT_DEEPSEEK_URL;
         if (model == null || model.isEmpty()) model = DEFAULT_MODEL_NAME;
 
+        // browsers[]
+        List<BrowserConfig> browsers = new ArrayList<>();
+        JSONArray arr = json.optJSONArray("browsers");
+        if (arr != null) {
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject b = arr.optJSONObject(i);
+                if (b == null) continue;
+                String name = b.optString("name", "browser-" + (i + 1));
+                String path = b.isNull("path")        ? null : b.optString("path", null);
+                String udd  = b.isNull("userDataDir") ? null : b.optString("userDataDir", null);
+                if (path == null || path.isEmpty()) {
+                    System.err.println("[CONFIG] browsers[" + i + "] has no 'path', skipped");
+                    continue;
+                }
+                browsers.add(new BrowserConfig(name, path, udd));
+            }
+        }
+
         return new Config(port, watchdog, maxFile, maxTotal, width, debug,
-                extDir, profileDir, url, model);
+                extDir, url, model, browsers, mailClient, mailAdmin);
     }
 
     // ============================================================
@@ -195,17 +229,14 @@ public final class Config {
 
             if (c == '"') { inString = true; out.append(c); i++; continue; }
 
-            // // line comment
             if (c == '/' && i + 1 < n && src.charAt(i + 1) == '/') {
                 while (i < n && src.charAt(i) != '\n') { out.append(' '); i++; }
                 continue;
             }
-            // # line comment
             if (c == '#') {
                 while (i < n && src.charAt(i) != '\n') { out.append(' '); i++; }
                 continue;
             }
-            // /* block comment */
             if (c == '/' && i + 1 < n && src.charAt(i + 1) == '*') {
                 out.append(' ').append(' ');
                 i += 2;
@@ -276,38 +307,71 @@ public final class Config {
     //  Default config template
     // ============================================================
     private static String defaultJsonText() {
-        return
-                "{\n" +
-                        "    // HTTP-порт сервера (Ollama API + bridge)\n" +
-                        "    \"port\": 11434,\n" +
-                        "\n" +
-                        "    // Таймаут watchdog: сколько ждём stream-done от браузера (мс)\n" +
-                        "    \"watchdogTimeoutMs\": 120000,\n" +
-                        "\n" +
-                        "    // Максимальный размер одного вложения (байт)\n" +
-                        "    \"maxFileBytes\": 20971520,\n" +
-                        "\n" +
-                        "    // Максимальный суммарный размер всех вложений (байт)\n" +
-                        "    \"maxTotalBytes\": 52428800,\n" +
-                        "\n" +
-                        "    /* Ширина консоли для word-wrap.\n" +
-                        "       Приоритет: -Dds.console.width > env COLUMNS > это значение. */\n" +
-                        "    \"consoleWidth\": 120,\n" +
-                        "\n" +
-                        "    // Печатать входящие JSON-запросы (или задайте --debug)\n" +
-                        "    \"debug\": false,\n" +
-                        "\n" +
-                        "    // Путь к папке Chrome-расширения (null = не загружать)\n" +
-                        "    \"extensionDir\": null,\n" +
-                        "\n" +
-                        "    // Путь к профилю Chrome (null = по умолчанию)\n" +
-                        "    \"profileDir\": null,\n" +
-                        "\n" +
-                        "    // URL, который открывает ChromeLauncher\n" +
-                        "    \"deepseekUrl\": \"https://chat.deepseek.com/\",\n" +
-                        "\n" +
-                        "    // Имя модели в Ollama / OpenAI API\n" +
-                        "    \"modelName\": \"DeepSeekCloud\"\n" +
-                        "}\n";
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\n");
+        sb.append("    // HTTP-порт сервера (Ollama API + bridge)\n");
+        sb.append("    \"port\": 11434,\n");
+        sb.append("\n");
+        sb.append("    // Таймаут watchdog: сколько ждём stream-done от браузера (мс)\n");
+        sb.append("    \"watchdogTimeoutMs\": 120000,\n");
+        sb.append("\n");
+        sb.append("    // Максимальный размер одного вложения (байт)\n");
+        sb.append("    \"maxFileBytes\": 20971520,\n");
+        sb.append("\n");
+        sb.append("    // Максимальный суммарный размер всех вложений (байт)\n");
+        sb.append("    \"maxTotalBytes\": 52428800,\n");
+        sb.append("\n");
+        sb.append("    /* Ширина консоли для word-wrap.\n");
+        sb.append("       Приоритет: -Dds.console.width > env COLUMNS > это значение. */\n");
+        sb.append("    \"consoleWidth\": 120,\n");
+        sb.append("\n");
+        sb.append("    // Печатать входящие JSON-запросы (или задайте --debug)\n");
+        sb.append("    \"debug\": false,\n");
+        sb.append("\n");
+        sb.append("    // URL, который открывают браузеры (в режиме --app)\n");
+        sb.append("    \"deepseekUrl\": \"https://chat.deepseek.com/\",\n");
+        sb.append("\n");
+        sb.append("    // Имя модели в Ollama / OpenAI API\n");
+        sb.append("    \"modelName\": \"DeepSeekCloud\",\n");
+        sb.append("\n");
+        sb.append("    // Папка Chrome-расширения (null = не загружать; --extension= переопределяет)\n");
+        sb.append("    \"extensionDir\": null,\n");
+        sb.append("\n");
+        sb.append("    /* ============================================================\n");
+        sb.append("       Список браузеров для автоматического запуска.\n");
+        sb.append("       Каждый браузер открывается на deepseekUrl в режиме --app\n");
+        sb.append("       (без адресной строки и вкладок) со своим профилем\n");
+        sb.append("       --user-data-dir. Пустой массив = авто-поиск Chrome.\n");
+        sb.append("\n");
+        sb.append("       Внимание: прямые слеши '/' работают и на Windows\n");
+        sb.append("       (Chrome и java.io.File их понимают).\n");
+        sb.append("\n");
+        sb.append("       Пример Windows:\n");
+        sb.append("         {\"name\":\"User1\",\n");
+        sb.append("          \"path\":\"C:/Program Files/Google/Chrome/Application/chrome.exe\",\n");
+        sb.append("          \"userDataDir\":\"C:/Chrome_Profiles/User1\"}\n");
+        sb.append("\n");
+        sb.append("       Пример Linux:\n");
+        sb.append("         {\"name\":\"User1\",\n");
+        sb.append("          \"path\":\"/usr/bin/google-chrome\",\n");
+        sb.append("          \"userDataDir\":\"/home/user/.chrome-profiles/User1\"}\n");
+        sb.append("\n");
+        sb.append("       Пример macOS:\n");
+        sb.append("         {\"name\":\"User1\",\n");
+        sb.append("          \"path\":\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\",\n");
+        sb.append("          \"userDataDir\":\"/Users/user/.chrome-profiles/User1\"}\n");
+        sb.append("       ============================================================ */\n");
+        sb.append("    \"browsers\": [],\n");
+        sb.append("\n");
+        sb.append("    /* Почтовый клиент — открывается отдельным --app окном\n");
+        sb.append("       без своего --user-data-dir. null или \"\" = не открывать.\n");
+        sb.append("       Например: \"https://mail.smwrap.ru/webmail\" */\n");
+        sb.append("    \"mailClientUrl\": null,\n");
+        sb.append("\n");
+        sb.append("    /* Админка почты — аналогично (без своего профиля).\n");
+        sb.append("       Например: \"https://mail.smwrap.ru/admin/login\" */\n");
+        sb.append("    \"mailAdminUrl\": null\n");
+        sb.append("}\n");
+        return sb.toString();
     }
 }
