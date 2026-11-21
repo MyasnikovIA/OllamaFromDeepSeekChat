@@ -45,6 +45,7 @@ public final class BridgeLogHandler {
                 case "token-limit":   CommandDispatcher.onTokenLimit(tabId, text); break;
                 case "bye":           CommandDispatcher.onBye(tabId, text); break;
                 case "tab-op":        printTabOp(text); break;
+                case "ajax-result":   onAjaxResult(json); break;   // ← НОВОЕ
                 case "console-error":
                     ConsoleWriter.get().ensureNewline();
                     System.out.println("[EXT-ERR] " + text);
@@ -66,5 +67,24 @@ public final class BridgeLogHandler {
         ConsoleWriter.get().ensureNewline();
         System.out.println("[TABOP] " + (text == null ? "" : text));
         System.out.print("> "); System.out.flush();
+    }
+    /**
+     * Пришёл результат AJAX-запроса от вкладки.
+     * Ожидаем: { level:"ajax-result", requestId, ok, status, headers, body, url, error? }
+     */
+    private static void onAjaxResult(JSONObject json) {
+        String requestId = json.optString("requestId", "");
+        if (requestId.isEmpty()) return;
+
+        JSONObject result = new JSONObject();
+        result.put("ok",      json.optBoolean("ok", false));
+        result.put("status",  json.optInt("status", 0));
+        result.put("headers", json.optJSONObject("headers") == null
+                ? new JSONObject() : json.optJSONObject("headers"));
+        result.put("body",    json.optString("body", ""));
+        result.put("url",     json.optString("url", ""));
+        if (json.has("error")) result.put("error", json.optString("error", ""));
+
+        AjaxRegistry.complete(requestId, result);
     }
 }

@@ -98,7 +98,6 @@
     } catch (_) {}
   }
 
-  // ИСПРАВЛЕНО: используем только pagehide, так как unload запрещён в Chrome
   window.addEventListener("pagehide", (e) => {
     sendBye(e && e.persisted ? "pagehide-persisted" : "pagehide");
   }, { capture: true });
@@ -233,9 +232,101 @@
     postLog(level === "error" ? "console-error" : level, text);
   });
 
+  // ============================================================
+  //  Прямое чтение режимов из DOM (без участия injected.js).
+  //
+  //  content-script имеет доступ к document, поэтому может сам
+  //  найти тогглы DeepThink / Search по aria-pressed и отправить
+  //  mode-state на сервер. Это работает, даже если injected.js
+  //  никогда не диспатчит EVT_MODE_STATE.
+  // ============================================================
+  function findThinkingToggleInDom() {
+    for (const el of document.querySelectorAll("[aria-pressed]")) {
+      const text = (el.textContent || "").trim();
+      if (/Глубокое мышление/i.test(text)
+          || /Deep\s*Think/i.test(text)
+          || /^R1$/i.test(text)) {
+        return el;
+      }
+      const title = el.getAttribute("title") || el.getAttribute("aria-label") || "";
+      if (/Глубокое мышление/i.test(title) || /Deep\s*Think/i.test(title)) {
+        return el;
+      }
+    }
+    for (const el of document.querySelectorAll("[aria-pressed]")) {
+      for (const p of el.querySelectorAll("svg path")) {
+        const d = p.getAttribute("d") || "";
+        if (d.startsWith("M8.00192 6.64454")) return el;
+      }
+    }
+    return null;
+  }
+
+  function findSmartSearchToggleInDom() {
+    for (const el of document.querySelectorAll("[aria-pressed]")) {
+      const spans = el.querySelectorAll("span");
+      for (const s of spans) {
+        const t = (s.textContent || "").trim();
+        if (/^(Search|Умный поиск)$/i.test(t)) return el;
+      }
+      const title = el.getAttribute("title") || el.getAttribute("aria-label") || "";
+      if (/^(Search|Умный поиск)$/i.test(title)) return el;
+    }
+    for (const el of document.querySelectorAll("[aria-pressed]")) {
+      let hasSearchHandle = false;
+      let isThinking = false;
+      for (const p of el.querySelectorAll("svg path")) {
+        const d = p.getAttribute("d") || "";
+        if (d.includes("M1.6399999856948853,8 C1.6399999856948853,8 14.359999656677246,8 14.359999656677246,8")) {
+          hasSearchHandle = true;
+        }
+        if (d.startsWith("M8.00192 6.64454")) {
+          isThinking = true;
+        }
+      }
+      if (hasSearchHandle && !isThinking) return el;
+    }
+    return null;
+  }
+
+  function readModesFromDom() {
+    const thinkEl  = findThinkingToggleInDom();
+    const searchEl = findSmartSearchToggleInDom();
+    return {
+      thinking:    !!(thinkEl  && thinkEl.getAttribute("aria-pressed") === "true"),
+      smartSearch: !!(searchEl && searchEl.getAttribute("aria-pressed") === "true")
+    };
+  }
+
+  let __lastModeState = { thinking: null, smartSearch: null };
+
+  function reportModes(force) {
+    let m;
+    try { m = readModesFromDom(); } catch (_) { return; }
+    if (!force
+        && m.thinking === __lastModeState.thinking
+        && m.smartSearch === __lastModeState.smartSearch) {
+      return;
+    }
+    __lastModeState = m;
+    postLog("mode-state", JSON.stringify(m));
+  }
+
+  try {
+    const obs = new MutationObserver(() => reportModes(false));
+    obs.observe(document.documentElement || document, {
+      childList: true, subtree: true, attributes: true,
+      attributeFilter: ["aria-pressed", "class"]
+    });
+  } catch (_) {}
+  setTimeout(() => reportModes(true), 1500);
+  setInterval(() => reportModes(false), 2000);
+
   window.addEventListener(EVT_RESULT, (evt) => {
     const { ok = true, text = "" } = evt.detail || {};
     postLog(ok ? "result" : "error", text);
+    // после любой команды синхронизировать режимы с сервером
+    if (ok) setTimeout(() => reportModes(true), 200);
   });
 
   window.addEventListener(EVT_MODE_STATE, (evt) => {
@@ -354,6 +445,8 @@
       ua: navigator.userAgent
     }));
     dispatchToMain({ type: "getState" });
+    // принудительный снимок режимов сразу после подключения
+    setTimeout(() => reportModes(true), 500);
   }
   function scheduleReconnect() {
     if (reconnectTimer) return;

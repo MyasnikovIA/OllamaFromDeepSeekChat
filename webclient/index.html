@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>DeepSeek Bridge — Chat</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<!-- ======================= ЭКРАН ПОДКЛЮЧЕНИЯ ======================= -->
+<div id="connect-screen" class="screen">
+    <div class="connect-card">
+        <div class="connect-logo">🌉</div>
+        <h1>DeepSeek Bridge</h1>
+        <p class="connect-sub">Подключение к локальному серверу bridge</p>
+
+        <label class="connect-label">URL сервера</label>
+        <input id="connect-url" type="text" value="http://localhost:11434" spellcheck="false">
+
+        <button id="connect-btn" class="btn btn-primary btn-block">Подключиться</button>
+        <div id="connect-status" class="connect-status"></div>
+
+        <div class="connect-hint">
+            Запустите <code>FakeOllamaFromDeepSeekChat</code>, откройте вкладку
+            <code>https://chat.deepseek.com/</code> с установленным расширением.
+        </div>
+    </div>
+</div>
+
+<!-- ======================= ОСНОВНОЙ ЭКРАН ======================= -->
+<div id="chat-screen" class="screen hidden">
+
+    <!-- ---------- Сайдбар ---------- -->
+    <aside class="sidebar">
+        <div class="sidebar-header">
+            <div class="brand">
+                <span class="brand-icon">🌉</span>
+                <span class="brand-name">DeepSeek Bridge</span>
+            </div>
+            <button id="new-chat-btn" class="btn-icon" title="Новый чат">＋</button>
+        </div>
+
+        <div class="sidebar-section">
+            <div class="sidebar-title">
+                Вкладки
+                <button id="refresh-tabs-btn" class="btn-icon btn-icon-sm" title="Обновить">⟳</button>
+            </div>
+            <ul id="tabs-list" class="tabs-list"></ul>
+        </div>
+
+        <div class="sidebar-section">
+            <div class="sidebar-title">Режимы</div>
+            <div class="modes">
+                <label class="mode-toggle">
+                    <input type="checkbox" id="mode-think">
+                    <span class="mode-slider"></span>
+                    <span class="mode-label">🧠 DeepThink</span>
+                </label>
+                <label class="mode-toggle">
+                    <input type="checkbox" id="mode-search">
+                    <span class="mode-slider"></span>
+                    <span class="mode-label">🔍 Search</span>
+                </label>
+            </div>
+        </div>
+
+        <div class="sidebar-footer">
+            <div class="status-pill" id="status-pill">
+                <span class="status-dot"></span>
+                <span class="status-text">Подключено</span>
+            </div>
+        </div>
+    </aside>
+
+    <!-- ---------- Основная область чата ---------- -->
+    <main class="main">
+        <header class="chat-header">
+            <div class="chat-header-info">
+                <div class="chat-title" id="chat-title">Чат</div>
+                <div class="chat-subtitle" id="chat-subtitle">—</div>
+            </div>
+            <button id="new-chat-btn-top" class="btn-header" title="Новый чат">＋ Новый чат</button>
+        </header>
+
+        <div class="messages" id="messages">
+            <div class="empty-state" id="empty-state">
+                <div class="empty-icon">💬</div>
+                <div class="empty-title">Начните диалог</div>
+                <div class="empty-sub">Отправьте сообщение, чтобы DeepSeek ответил</div>
+            </div>
+        </div>
+
+        <footer class="composer">
+            <button id="stop-btn" class="btn-stop hidden" title="Остановить">■</button>
+            <textarea id="composer-input" rows="1"
+                      placeholder="Сообщение для DeepSeek… (Enter — отправить, Shift+Enter — перенос)"></textarea>
+            <button id="send-btn" class="btn-send" title="Отправить">➤</button>
+        </footer>
+    </main>
+
+</div>
+
+<script src="js/config.js"></script>
+<script src="js/api.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/chat.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

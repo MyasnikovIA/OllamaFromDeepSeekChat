@@ -147,13 +147,12 @@ public final class CommandDispatcher {
     }
 
     // ============================================================
-    //  /log: result / error
-    //
-    //  НОВОЕ: если нет активного listener'а — печатаем всегда
-    //  (это результат ручных команд: stop/resume/eval/...).
+    //  /log: result — УСПЕШНЫЙ результат от вкладки
+    //  (injected.js шлёт level="result" только для emitResult(true, …))
     // ============================================================
     public static void onResult(String text) {
-        if (text.startsWith("sent:")) return;
+        if (text == null) text = "";
+        if (text.startsWith("sent:")) return;  // send → стрим идёт отдельно
 
         StreamListener l = activeListener;
         activeListener = null;
@@ -165,7 +164,8 @@ public final class CommandDispatcher {
         ConsoleWriter.get().ensureNewline();
 
         if (l != null) {
-            try { l.onError(text); } catch (Exception ignored) {}
+            // ← ИСПРАВЛЕНО: result = успех, поэтому onDone(), а не onError()
+            try { l.onDone(); } catch (Exception ignored) {}
         } else {
             System.out.println("✓ " + text);
             System.out.print("> ");
@@ -175,6 +175,9 @@ public final class CommandDispatcher {
         trySendNext();
     }
 
+    // ============================================================
+    //  /log: error — реальная ошибка
+    // ============================================================
     public static void onError(String text) {
         StreamListener l = activeListener;
         activeListener = null;
@@ -185,12 +188,14 @@ public final class CommandDispatcher {
 
         ConsoleWriter.get().ensureNewline();
 
+        if (text != null && !text.isEmpty()) {
+            System.out.println("[!] " + text);
+        }
+        System.out.print("> ");
+        System.out.flush();
+
         if (l != null) {
             try { l.onError(text); } catch (Exception ignored) {}
-        } else {
-            System.out.println("[!] " + text);
-            System.out.print("> ");
-            System.out.flush();
         }
         trySendNext();
     }
