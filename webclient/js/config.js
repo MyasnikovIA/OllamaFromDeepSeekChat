@@ -14,4 +14,14 @@ window.DSConfig = {
   setBaseUrl(url) {
     localStorage.setItem(this.STORAGE_KEY, url.replace(/\/+$/, ""));
   },
+
+  // ← НОВОЕ: полная очистка сохранённого URL (logout)
+  clearBaseUrl() {
+    localStorage.removeItem(this.STORAGE_KEY);
+  },
+
+  // ← НОВОЕ: есть ли сохранённый URL (для решения об auto-connect)
+  hasSavedUrl() {
+    return localStorage.getItem(this.STORAGE_KEY) !== null;
+  },
 };

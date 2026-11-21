@@ -64,7 +64,13 @@
                 <span class="status-dot"></span>
                 <span class="status-text">Подключено</span>
             </div>
-            <button id="change-server-btn" class="btn-icon btn-icon-sm" title="Сменить сервер" style="float: right; margin-top: -24px;">⚙</button>
+            <!-- ← НОВОЕ: две кнопки — смена сервера (⚙) и logout (🚪) -->
+            <div style="float: right; margin-top: -24px; display: flex; gap: 6px;">
+                <button id="change-server-btn" class="btn-icon btn-icon-sm"
+                        title="Сменить сервер (URL сохранится)">⚙</button>
+                <button id="logout-btn" class="btn-icon btn-icon-sm"
+                        title="Выйти и забыть сервер">🚪</button>
+            </div>
         </div>
     </aside>
 
@@ -79,13 +85,12 @@
 
         <div id="messages-container"></div>
 
+        <div id="pending-files-list" class="pending-files-list hidden"></div>
+
         <footer class="composer">
             <button id="stop-btn" class="btn-stop hidden" title="Остановить">■</button>
-
-            <!-- Кнопка прикрепления файлов -->
             <button id="attach-btn" class="btn-attach" title="Прикрепить файл">📎</button>
             <input type="file" id="file-input" multiple style="display: none;">
-
             <textarea id="composer-input" rows="1" placeholder="Сообщение для DeepSeek… (Enter — отправить, Shift+Enter — перенос)"></textarea>
             <button id="send-btn" class="btn-send" title="Отправить">➤</button>
         </footer>

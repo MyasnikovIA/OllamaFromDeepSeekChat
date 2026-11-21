@@ -6,9 +6,9 @@
       this.baseUrl = (baseUrl || "").replace(/\/+$/, "");
     }
 
-    async _json(method, path, body) {
+    async _json(method, path, body, timeoutMs = 130000) {
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(new Error("request timeout")), 130000);
+      const timer = setTimeout(() => ctrl.abort(new Error("request timeout")), timeoutMs);
       try {
         const resp = await fetch(this.baseUrl + path, {
           method,
@@ -20,9 +20,7 @@
         try { data = await resp.json(); }
         catch (_) { throw new Error("invalid JSON from server (HTTP " + resp.status + ")"); }
 
-        if (!resp.ok && !data.ok) {
-          throw new Error(data.error || ("HTTP " + resp.status));
-        }
+        if (!resp.ok && !data.ok) throw new Error(data.error || ("HTTP " + resp.status));
         return data;
       } finally {
         clearTimeout(timer);
@@ -41,73 +39,55 @@
       return true;
     }
 
-    async tabs() {
-      const result = await this.cmd("tabs");
-      return Array.isArray(result.tabs) ? result.tabs : [];
-    }
-
-    async selectTab(tabId) {
-      return this.cmd("tab", { tabId });
-    }
-
-    async state() {
-      return this.cmd("state");
-    }
-
-    async setThinking(on) {
-      return this.cmd(on ? "enableThinking" : "disableThinking");
-    }
-    async setSearch(on) {
-      return this.cmd(on ? "enableSmartSearch" : "disableSmartSearch");
-    }
-
+    // ===== Основные команды =====
+    async tabs() { const r = await this.cmd("tabs"); return Array.isArray(r.tabs) ? r.tabs : []; }
+    async selectTab(tabId) { return this.cmd("tab", { tabId }); }
+    async state() { return this.cmd("state"); }
+    async setThinking(on) { return this.cmd(on ? "enableThinking" : "disableThinking"); }
+    async setSearch(on) { return this.cmd(on ? "enableSmartSearch" : "disableSmartSearch"); }
     async newChat()   { return this.cmd("newChat"); }
     async stop()      { return this.cmd("stopGeneration"); }
     async resume()    { return this.cmd("resumeGeneration"); }
+    async browsers() { const r = await this.cmd("browsers"); return Array.isArray(r.browsers) ? r.browsers : []; }
+    async openBrowser(index) { return this.cmd("openBrowser", { index }); }
+    async cmdFile(path, text = "") { return this.cmd("file", { path, text }); }
 
-    async browsers() {
-      const result = await this.cmd("browsers");
-      return Array.isArray(result.browsers) ? result.browsers : [];
-    }
+    // ===== Пошаговые команды =====
+    async attach(files)      { return this.cmd("attach", { files }); }
+    async detach()           { return this.cmd("detach"); }
+    async setText(text)      { return this.cmd("setText", { text }); }
+    async appendText(text)   { return this.cmd("appendText", { text }); }
+    async clickSend()        { return this.cmd("clickSend"); }
+    async sendWithAttached(text) { return this.cmd("sendWithAttached", { text }); }
 
-    async openBrowser(index) {
-      return this.cmd("openBrowser", { index });
-    }
-
-    // ===== НОВОЕ: файл с диска сервера через /api/command type:"file" =====
-    // Использовать только если файл физически лежит на машине сервера.
-    async cmdFile(path, text = "") {
-      return this.cmd("file", { path, text });
-    }
+    // ===== Буфер обмена =====
+    async clipboardAttach(files) { return this.cmd("clipboardAttach", { files }); }
+    async clipboardCopy(files)   { return this.cmd("clipboardCopy", { files }); }
+    async clipboardPaste()       { return this.cmd("clipboardPaste"); }
 
     // ----------------------------------------------------------
-    //  Потоковый чат
-    //
-    //  messages — массив {role, content}:
-    //    content может быть:
-    //      - строкой (простой текст)
-    //      - массивом [{type:"text"}, {type:"file", file:{...}}, ...]
-    //
-    //  Сервер (OllamaInputExtractor) умеет и то, и другое.
+    //  Потоковый чат (NDJSON)
+    //  opts: { signal, clipboard, skipAttach, strict, setTextFirst,
+    //          files: [{ name, mimeType, dataBase64 }, ...] }
     // ----------------------------------------------------------
-    chatStream(messages, { signal } = {}) {
+    chatStream(messages, opts = {}) {
       const url = this.baseUrl + "/api/chat";
-      const body = {
-        model: "DeepSeekCloud",
-        messages: messages,
-        stream: true,
-      };
+      const body = { model: "DeepSeekCloud", messages, stream: true };
+
+      if (opts.clipboard    === true) body.clipboard = true;
+      if (opts.skipAttach   === true) body.skipAttach = true;
+      if (opts.strict       === true) body.strict = true;
+      if (opts.setTextFirst === false) body.setTextFirst = false;
+      // ← НОВОЕ: передаём файлы, которые нужно прикрепить перед отправкой
+      if (Array.isArray(opts.files) && opts.files.length > 0) body.files = opts.files;
 
       const listeners = { chunk: [], done: [], error: [] };
       let aborted = false;
       let finished = false;
 
       const ctrl = new AbortController();
-      if (signal) {
-        signal.addEventListener("abort", () => {
-          aborted = true;
-          ctrl.abort();
-        }, { once: true });
+      if (opts.signal) {
+        opts.signal.addEventListener("abort", () => { aborted = true; ctrl.abort(); }, { once: true });
       }
 
       const emitError = (err) => {
@@ -115,7 +95,6 @@
         finished = true;
         if (!aborted) listeners.error.forEach(fn => { try { fn(err); } catch (_) {} });
       };
-
       const emitDone = () => {
         if (finished) return;
         finished = true;
@@ -151,8 +130,11 @@
           while (true) {
             const { value, done } = await reader.read();
             if (done) break;
+
             buf += decoder.decode(value, { stream: true });
             let idx;
+
+            // Парсим NDJSON (каждая строка — отдельный JSON)
             while ((idx = buf.indexOf("\n")) !== -1) {
               const line = buf.slice(0, idx).trim();
               buf = buf.slice(idx + 1);
@@ -161,19 +143,19 @@
               let chunk;
               try { chunk = JSON.parse(line); } catch (_) { continue; }
 
+              // Если сервер вернул ошибку (например, из-за strict режима)
               if (chunk.error) {
                 emitError(new Error(chunk.error));
                 return;
               }
 
-              // ---- контент ответа ----
+              // Обработка контента
               if (chunk.message) {
                 if (typeof chunk.message.content === "string" && chunk.message.content) {
                   listeners.chunk.forEach(fn => {
                     try { fn(chunk.message.content, chunk.type || "RESPONSE"); } catch (_) {}
                   });
                 }
-                // На будущее: OpenAI-совместимый reasoning
                 if (typeof chunk.message.reasoning_content === "string" && chunk.message.reasoning_content) {
                   listeners.chunk.forEach(fn => {
                     try { fn(chunk.message.reasoning_content, "THINK"); } catch (_) {}

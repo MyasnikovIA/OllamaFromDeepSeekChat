@@ -7,6 +7,8 @@ import ru.miacomsoft.config.Config;
 
 import java.io.File;
 import java.nio.file.Files;
+import java.util.Base64;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
@@ -76,52 +78,240 @@ public final class BridgeCommands {
         sendFireAndForget(cmd.toString(), null);
     }
 
-    public static void sendFileFromStdin(String path, String text) {
+    // ============================================================
+    //  НОВОЕ: detach — отменить все висящие прикрепления
+    // ============================================================
+    public static void sendDetachFromStdin() {
+        ConsoleWriter cw = ConsoleWriter.get();
+        cw.ensureNewline();
+        System.out.println("[DETACH] отмена всех прикреплённых файлов…");
+        System.out.print("> "); System.out.flush();
+
+        JSONObject cmd = new JSONObject();
+        cmd.put("type", "detach");
+        CommandDispatcher.enqueue(new PendingCommand(cmd.toString(), null, true, false));
+    }
+
+    /**
+     * Для ApiCommandHandler: отправить detach и дождаться результата.
+     */
+    public static void sendDetachForApi(StreamListener listener) {
+        JSONObject cmd = new JSONObject();
+        cmd.put("type", "detach");
+        CommandDispatcher.enqueue(new PendingCommand(cmd.toString(), listener, false, false));
+    }
+
+    // ============================================================
+    //  НОВОЕ: sendWithAttached — отправить текст с уже прикреплёнными файлами
+    // ============================================================
+    /**
+     * Отправляет текст, НЕ прикрепляя файлы (они уже в composer).
+     * Используется, когда пользователь прикрепил файлы вручную
+     * и хочет только ввести текст + нажать «Отправить».
+     */
+    public static void sendWithAttachedFromStdin(String text) {
+        ConsoleWriter cw = ConsoleWriter.get();
+        cw.ensureNewline();
+        System.out.println("[SEND-WITH-ATTACHED] " + (text == null ? "" : text));
+        System.out.print("> "); System.out.flush();
+
+        JSONObject cmd = new JSONObject();
+        cmd.put("type", "sendWithAttached");
+        cmd.put("text", text == null ? "" : text);
+        CommandDispatcher.enqueue(new PendingCommand(cmd.toString(), null, true, true));
+    }
+
+    /**
+     * Для ApiCommandHandler: то же, но с ожиданием результата.
+     */
+    public static void sendWithAttachedForApi(String text, StreamListener listener) {
+        JSONObject cmd = new JSONObject();
+        cmd.put("type", "sendWithAttached");
+        cmd.put("text", text == null ? "" : text);
+        CommandDispatcher.enqueue(new PendingCommand(cmd.toString(), listener, false, true));
+    }
+
+    // ============================================================
+    //  Чтение файла с диска → Attachment
+    // ============================================================
+    public static Attachment readFileAttachment(String path) {
         ConsoleWriter cw = ConsoleWriter.get();
         File f = new File(path);
         if (!f.isFile()) {
             cw.ensureNewline();
             System.out.println("[!] file not found: " + path);
             System.out.print("> "); System.out.flush();
-            return;
+            return null;
         }
         if (f.length() > BridgeConstants.MAX_FILE_BYTES) {
             cw.ensureNewline();
-            System.out.println("[!] file too large: " + f.length() + " bytes (max " + BridgeConstants.MAX_FILE_BYTES + ")");
+            System.out.println("[!] file too large: " + f.length()
+                    + " bytes (max " + BridgeConstants.MAX_FILE_BYTES + ")");
             System.out.print("> "); System.out.flush();
-            return;
+            return null;
         }
         try {
             byte[] bytes = Files.readAllBytes(f.toPath());
-            String b64 = java.util.Base64.getEncoder().encodeToString(bytes);
+            String b64 = Base64.getEncoder().encodeToString(bytes);
             String mime = Files.probeContentType(f.toPath());
             if (mime == null) mime = BridgeUtils.guessMimeByName(f.getName());
-
-            JSONObject cmd = new JSONObject();
-            cmd.put("type", "send");
-            cmd.put("text", text == null ? "" : text);
-            JSONArray arr = new JSONArray();
-            JSONObject o = new JSONObject();
-            o.put("name", f.getName());
-            o.put("mimeType", mime);
-            o.put("dataBase64", b64);
-            arr.put(o);
-            cmd.put("files", arr);
-
-            cw.ensureNewline();
-            System.out.println("[FILE] " + f.getName() + " (" + bytes.length + " bytes, " + mime + ")" + (text != null && !text.isEmpty() ? " → " + text : ""));
-            System.out.print("> "); System.out.flush();
-
-            CommandDispatcher.enqueue(new PendingCommand(cmd.toString(), null, true, true));
+            return new Attachment(f.getName(), mime, b64);
         } catch (Exception e) {
             cw.ensureNewline();
             System.out.println("[!] file read error: " + e.getMessage());
             System.out.print("> "); System.out.flush();
+            return null;
+        }
+    }
+
+    public static Attachment readFileAttachmentForApi(String path) {
+        File f = new File(path);
+        if (!f.isFile()) return null;
+        if (f.length() > BridgeConstants.MAX_FILE_BYTES) return null;
+        try {
+            byte[] bytes = Files.readAllBytes(f.toPath());
+            String b64 = Base64.getEncoder().encodeToString(bytes);
+            String mime = Files.probeContentType(f.toPath());
+            if (mime == null) mime = BridgeUtils.guessMimeByName(f.getName());
+            return new Attachment(f.getName(), mime, b64);
+        } catch (Exception e) {
+            return null;
         }
     }
 
     // ============================================================
-    //  chat API (используется пакетом ollama)
+    //  stdin: /file (send с вложением)
+    // ============================================================
+    public static void sendFileFromStdin(String path, String text) {
+        Attachment a = readFileAttachment(path);
+        if (a == null) return;
+
+        JSONObject cmd = new JSONObject();
+        cmd.put("type", "send");
+        cmd.put("text", text == null ? "" : text);
+        JSONArray arr = new JSONArray();
+        JSONObject o = new JSONObject();
+        o.put("name", a.name);
+        o.put("mimeType", a.mimeType);
+        o.put("dataBase64", a.dataBase64);
+        arr.put(o);
+        cmd.put("files", arr);
+
+        ConsoleWriter cw = ConsoleWriter.get();
+        cw.ensureNewline();
+        System.out.println("[FILE] " + a.name
+                + " (" + a.dataBase64.length() + " b64 chars, " + a.mimeType + ")"
+                + (text != null && !text.isEmpty() ? " → " + text : ""));
+        System.out.print("> "); System.out.flush();
+
+        CommandDispatcher.enqueue(new PendingCommand(cmd.toString(), null, true, true));
+    }
+
+    // ============================================================
+    //  Clipboard API
+    // ============================================================
+    public static void sendClipboardCommand(String type,
+                                            List<Attachment> attachments,
+                                            StreamListener listener) {
+        if (type == null || type.isEmpty()) {
+            if (listener != null) listener.onError("empty clipboard command type");
+            else printConsoleError("empty clipboard command type");
+            return;
+        }
+
+        boolean hasFiles = attachments != null && !attachments.isEmpty();
+        boolean isPaste   = "clipboardPaste".equals(type);
+
+        if (!isPaste && !hasFiles) {
+            if (listener != null) listener.onError("no attachments for " + type);
+            else printConsoleError("no attachments for " + type);
+            return;
+        }
+
+        if (hasFiles) {
+            long totalB64 = 0;
+            for (Attachment a : attachments) {
+                long bin = a.dataBase64 == null ? 0 : (a.dataBase64.length() * 3L) / 4L;
+                if (bin > BridgeConstants.MAX_FILE_BYTES) {
+                    String msg = "file too large: " + a.name
+                            + " (" + bin + " > " + BridgeConstants.MAX_FILE_BYTES + ")";
+                    if (listener != null) listener.onError(msg);
+                    else printConsoleError(msg);
+                    return;
+                }
+                totalB64 += a.dataBase64 == null ? 0 : a.dataBase64.length();
+            }
+            long totalBin = (totalB64 * 3L) / 4L;
+            if (totalBin > BridgeConstants.MAX_TOTAL_BYTES) {
+                String msg = "attachments total size exceeds "
+                        + BridgeConstants.MAX_TOTAL_BYTES;
+                if (listener != null) listener.onError(msg);
+                else printConsoleError(msg);
+                return;
+            }
+        }
+
+        JSONObject cmd = new JSONObject();
+        cmd.put("type", type);
+
+        if (hasFiles) {
+            JSONArray arr = new JSONArray();
+            for (Attachment a : attachments) {
+                JSONObject o = new JSONObject();
+                o.put("name", a.name == null ? "file" : a.name);
+                o.put("mimeType", a.mimeType == null
+                        ? "application/octet-stream" : a.mimeType);
+                o.put("dataBase64", a.dataBase64 == null ? "" : a.dataBase64);
+                arr.put(o);
+            }
+            cmd.put("files", arr);
+        }
+
+        boolean fromStdin = (listener == null);
+        CommandDispatcher.enqueue(
+                new PendingCommand(cmd.toString(), listener, fromStdin, false)
+        );
+    }
+
+    public static void sendClipboardAttachFromStdin(String path) {
+        Attachment a = readFileAttachment(path);
+        if (a == null) return;
+
+        ConsoleWriter cw = ConsoleWriter.get();
+        cw.ensureNewline();
+        System.out.println("[CLIPATTACH] " + a.name
+                + " (" + a.dataBase64.length() + " b64 chars, " + a.mimeType + ")");
+        System.out.print("> "); System.out.flush();
+
+        sendClipboardCommand("clipboardAttach",
+                Collections.singletonList(a), null);
+    }
+
+    public static void sendClipboardCopyFromStdin(String path) {
+        Attachment a = readFileAttachment(path);
+        if (a == null) return;
+
+        ConsoleWriter cw = ConsoleWriter.get();
+        cw.ensureNewline();
+        System.out.println("[CLIPCOPY] " + a.name
+                + " (" + a.dataBase64.length() + " b64 chars, " + a.mimeType + ")");
+        System.out.print("> "); System.out.flush();
+
+        sendClipboardCommand("clipboardCopy",
+                Collections.singletonList(a), null);
+    }
+
+    public static void sendClipboardPasteFromStdin() {
+        ConsoleWriter cw = ConsoleWriter.get();
+        cw.ensureNewline();
+        System.out.println("[CLIPPASTE] вставка из буфера обмена…");
+        System.out.print("> "); System.out.flush();
+
+        sendClipboardCommand("clipboardPaste", null, null);
+    }
+
+    // ============================================================
+    //  chat API (для ollama)
     // ============================================================
     public static CompletableFuture<String> sendChat(String text) {
         return sendChat(text, null);
@@ -144,14 +334,38 @@ public final class BridgeCommands {
         sendChatStream(text, null, listener);
     }
 
+    // Старая сигнатура — дефолтные флаги (обратная совместимость)
     public static void sendChatStream(String text, List<Attachment> attachments, StreamListener listener) {
+        sendChatStream(text, attachments, listener, false, false, false, true);
+    }
+
+    // Сигнатура с clipboard (обратная совместимость с Ответом 3)
+    public static void sendChatStream(String text, List<Attachment> attachments,
+                                      StreamListener listener, boolean clipboard) {
+        sendChatStream(text, attachments, listener, clipboard, false, false, true);
+    }
+
+    /**
+     * Полная сигнатура с флагами.
+     *
+     * @param clipboard    файлы через clipboard (а не через input[type=file])
+     * @param strict       не отправлять, если attach провалился
+     * @param skipAttach   не прикреплять файлы (они уже в composer)
+     * @param setTextFirst true — сначала текст, потом файлы (по умолчанию)
+     */
+    public static void sendChatStream(String text, List<Attachment> attachments,
+                                      StreamListener listener,
+                                      boolean clipboard,
+                                      boolean strict,
+                                      boolean skipAttach,
+                                      boolean setTextFirst) {
         long totalB64 = 0;
-        if (attachments != null) {
+        if (attachments != null && !skipAttach) {
             for (Attachment a : attachments) {
                 long bin = a.dataBase64 == null ? 0 : (a.dataBase64.length() * 3L) / 4L;
                 if (bin > BridgeConstants.MAX_FILE_BYTES) {
                     if (listener != null) listener.onError("file too large: " + a.name + " (" + bin + " > " + BridgeConstants.MAX_FILE_BYTES + ")");
-                    else { ConsoleWriter.get().ensureNewline(); System.out.println("[!] file too large: " + a.name); System.out.print("> "); System.out.flush(); }
+                    else printConsoleError("file too large: " + a.name);
                     return;
                 }
                 totalB64 += a.dataBase64 == null ? 0 : a.dataBase64.length();
@@ -159,7 +373,7 @@ public final class BridgeCommands {
             long totalBin = (totalB64 * 3L) / 4L;
             if (totalBin > BridgeConstants.MAX_TOTAL_BYTES) {
                 if (listener != null) listener.onError("attachments total size exceeds " + BridgeConstants.MAX_TOTAL_BYTES);
-                else { ConsoleWriter.get().ensureNewline(); System.out.println("[!] attachments total too large"); System.out.print("> "); System.out.flush(); }
+                else printConsoleError("attachments total too large");
                 return;
             }
         }
@@ -167,7 +381,12 @@ public final class BridgeCommands {
         JSONObject cmd = new JSONObject();
         cmd.put("type", "send");
         cmd.put("text", text == null ? "" : text);
-        if (attachments != null && !attachments.isEmpty()) {
+        if (clipboard) cmd.put("clipboard", true);
+        if (strict) cmd.put("strict", true);
+        if (skipAttach) cmd.put("skipAttach", true);
+        if (!setTextFirst) cmd.put("setTextFirst", false); // default true — не шлём
+
+        if (attachments != null && !attachments.isEmpty() && !skipAttach) {
             JSONArray arr = new JSONArray();
             for (Attachment a : attachments) {
                 JSONObject o = new JSONObject();
@@ -195,9 +414,7 @@ public final class BridgeCommands {
 
     public static void closeTabFromStdin(String targetTabId) {
         if (targetTabId == null || targetTabId.isEmpty()) {
-            ConsoleWriter.get().ensureNewline();
-            System.out.println("[!] closeTab: empty targetTabId");
-            System.out.print("> "); System.out.flush();
+            printConsoleError("closeTab: empty targetTabId");
             return;
         }
         JSONObject cmd = new JSONObject();
@@ -213,7 +430,7 @@ public final class BridgeCommands {
     }
 
     // ============================================================
-    //  NEW: запуск браузера по индексу из списка Config.get().getBrowsers()
+    //  запуск браузера по индексу
     // ============================================================
     public static void launchBrowserFromStdin(int index) {
         Config cfg = Config.get();
@@ -221,7 +438,8 @@ public final class BridgeCommands {
 
         if (browsers == null || index < 0 || index >= browsers.size()) {
             ConsoleWriter.get().ensureNewline();
-            System.out.println("[!] Invalid browser index: " + index + " (total: " + (browsers == null ? 0 : browsers.size()) + ")");
+            System.out.println("[!] Invalid browser index: " + index
+                    + " (total: " + (browsers == null ? 0 : browsers.size()) + ")");
             System.out.print("> "); System.out.flush();
             return;
         }
@@ -231,7 +449,6 @@ public final class BridgeCommands {
         System.out.println("[CHROME] Launching browser #" + index + ": " + bc.displayName());
         System.out.print("> "); System.out.flush();
 
-        // Запускаем в отдельном потоке, чтобы не блокировать консоль
         new Thread(() -> {
             ChromeLauncher.launchNewWindow(cfg.getDeepseekUrl(), bc);
         }).start();
@@ -255,7 +472,7 @@ public final class BridgeCommands {
     }
 
     // ============================================================
-    //  helpers для Main (делегаты в TabRegistry / CommandDispatcher)
+    //  helpers
     // ============================================================
     public static void printTabs()  { TabRegistry.printTabs(); }
     public static void printState() { TabRegistry.printState(); }
@@ -265,4 +482,10 @@ public final class BridgeCommands {
     public static String  getTabIdByIndex(int idx)     { return TabRegistry.getTabIdByIndex(idx); }
     public static String  findActiveTabId(String q)    { return TabRegistry.findActiveTabId(q); }
     public static void    watchdogTick()               { CommandDispatcher.watchdogTick(); }
+
+    private static void printConsoleError(String msg) {
+        ConsoleWriter.get().ensureNewline();
+        System.out.println("[!] " + msg);
+        System.out.print("> "); System.out.flush();
+    }
 }

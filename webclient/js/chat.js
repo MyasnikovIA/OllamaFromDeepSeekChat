@@ -1,19 +1,11 @@
 (function () {
   "use strict";
 
-  // ===== ИЗМЕНЕНО: лимиты согласованы с сервером =====
-  // BridgeConstants.MAX_FILE_BYTES = 20 МБ, MAX_TOTAL_BYTES = 50 МБ
   const MAX_FILE_BYTES   = 20 * 1024 * 1024;
   const MAX_TOTAL_BYTES  = 50 * 1024 * 1024;
-
-  // Превью содержимого для текстовых файлов (только для UI-плашек)
   const MAX_PREVIEW_BYTES = 200 * 1024;
-
-  // Ограничение истории (в символах JSON), чтобы запрос не раздувался
   const MAX_HISTORY_CHARS = 100_000;
-
-  // Watchdog: если стрим не завершился за это время — принудительный _finish()
-  const STREAM_TIMEOUT_MS = 10 * 60 * 1000; // 10 минут
+  const STREAM_TIMEOUT_MS = 10 * 60 * 1000;
 
   const TEXT_MIME_RE = /^(text\/|application\/(json|xml|x-yaml|javascript|typescript))/i;
   const TEXT_EXT_RE  = /\.(txt|md|markdown|json|csv|tsv|log|xml|html?|js|mjs|ts|jsx|tsx|py|java|c|h|cpp|hpp|cs|go|rs|rb|php|css|scss|sass|yml|yaml|ini|cfg|conf|toml|sh|bat|ps1|sql|env)$/i;
@@ -44,9 +36,7 @@
         r.onload = () => resolve(String(r.result || ""));
         r.onerror = () => resolve("");
         r.readAsText(file);
-      } catch (_) {
-        resolve("");
-      }
+      } catch (_) { resolve(""); }
     });
   }
 
@@ -58,137 +48,85 @@
       this.busy = false;
       this.history = [];
       this._watchdogTimer = null;
+      this.strategy = "clipboard";
     }
 
-    // ----------------------------------------------------------
-    //  Чтение файлов: base64 + метаданные + превью для текстовых
-    // ----------------------------------------------------------
-    async _readFiles(files) {
-      const out = [];
-      let total = 0;
-
-      for (const f of files) {
-        if (f.size > MAX_FILE_BYTES) {
-          throw new Error(
-              `Файл "${f.name}" слишком большой: ${UI.humanSize(f.size)} ` +
-              `(макс ${UI.humanSize(MAX_FILE_BYTES)})`
-          );
-        }
-        total += f.size;
-        if (total > MAX_TOTAL_BYTES) {
-          throw new Error(
-              `Суммарный размер файлов превышает ${UI.humanSize(MAX_TOTAL_BYTES)}`
-          );
-        }
-
-        const b64 = await readAsBase64(f);
-
-        let preview = "";
-        if (f.size <= MAX_PREVIEW_BYTES && isProbablyText(f)) {
-          preview = await readAsText(f);
-        }
-
-        out.push({
-          name: f.name,
-          mime: f.type || "application/octet-stream",
-          size: f.size,
-          path: f.webkitRelativePath || f.name,
-          dataBase64: b64,
-          content: preview,   // только для UI-плашки
-        });
-      }
-      return out;
+    setStrategy(strategy) {
+      if (["inline", "clipboard", "auto"].includes(strategy)) this.strategy = strategy;
     }
 
-    // ----------------------------------------------------------
-    //  Формирование content для сервера (OpenAI-формат)
-    //
-    //  includeBase64=true  — с base64 (только для ТЕКУЩЕГО запроса)
-    //  includeBase64=false — только метаданные (для history)
-    // ----------------------------------------------------------
-    _buildUserContent(text, attachments, includeBase64) {
-      const safeText = text || "";
-      if (!attachments || attachments.length === 0) {
-        return safeText;
+    async _readFile(f) {
+      if (f.size > MAX_FILE_BYTES) {
+        throw new Error(`Файл "${f.name}" слишком большой`);
       }
-
-      const parts = [];
-      if (safeText) {
-        parts.push({ type: "text", text: safeText });
-      }
-      for (const a of attachments) {
-        const file = { name: a.name, mimeType: a.mime };
-        if (includeBase64) file.dataBase64 = a.dataBase64;
-        parts.push({ type: "file", file });
-      }
-      return parts;
+      const b64 = await readAsBase64(f);
+      return {
+        name: f.name, mime: f.type || "application/octet-stream",
+        size: f.size, path: f.webkitRelativePath || f.name,
+        dataBase64: b64, _isText: isProbablyText(f)
+      };
     }
 
-    // ----------------------------------------------------------
-    //  Обрезка истории, чтобы не гнать мегабайты на сервер
-    // ----------------------------------------------------------
-    _pruneHistory() {
-      let total = 0;
-      for (let i = this.history.length - 1; i >= 0; i--) {
-        let len;
-        try { len = JSON.stringify(this.history[i]).length; }
-        catch (_) { len = 0; }
-        total += len;
-        // Всегда оставляем минимум 2 последних (user + assistant)
-        if (total > MAX_HISTORY_CHARS && i < this.history.length - 2) {
-          this.history = this.history.slice(i);
-          return;
-        }
+    // =========================================================
+    //  Отправка ОДНОГО файла в плагин (без запуска чата)
+    // =========================================================
+    async uploadFileToPlugin(file) {
+      try {
+        const fileData = await this._readFile(file);
+        await this.api.clipboardAttach([{
+          name: fileData.name,
+          mimeType: fileData.mime,
+          dataBase64: fileData.dataBase64
+        }]);
+        UI.appendMessage(this.els.messages, `📋 Файл "${file.name}" вставлен в DeepSeek`, "system");
+      } catch (e) {
+        UI.appendMessage(this.els.messages, "Ошибка чтения/вставки файла: " + e.message, "error");
+        throw e;
       }
     }
 
-    // ----------------------------------------------------------
-    //  Отправка
-    // ----------------------------------------------------------
-    async send(text, files = []) {
-      if ((!text && files.length === 0) || this.busy) return;
+    // =========================================================
+    //  Отправка финального запроса (текст + неотправленные файлы)
+    //  Порядок на стороне плагина: setText → attachFiles → clickSend
+    // =========================================================
+    async send(text, pendingFiles = []) {
+      if ((!text && pendingFiles.length === 0) || this.busy) return;
 
-      // Показываем «пусто» только после успешного чтения файлов
-      if (this.els.emptyState) {
-        this.els.emptyState.classList.add("hidden");
-      }
-
-      // 1. Читаем файлы
-      let attachments = [];
-      if (files && files.length > 0) {
+      // 1. Читаем все неотправленные файлы в base64
+      const filesData = [];
+      for (const file of pendingFiles) {
         try {
-          attachments = await this._readFiles(files);
+          const fd = await this._readFile(file);
+          filesData.push({
+            name: fd.name,
+            mimeType: fd.mime,
+            dataBase64: fd.dataBase64,
+          });
         } catch (e) {
-          // Возвращаем пустое состояние, если оно было
-          if (this.els.emptyState) this.els.emptyState.classList.remove("hidden");
-          UI.appendMessage(this.els.messages, "Ошибка чтения файлов: " + e.message, "error");
-          return;
+          UI.appendMessage(this.els.messages,
+              `Ошибка чтения "${file.name}": ${e.message}`, "error");
+          return; // не отправляем, если файл не прочитался
         }
       }
 
-      this.busy = true;
-
-      // 2. Для сервера — content с base64 в ПОСЛЕДНЕМ сообщении
-      const currentUserContent = this._buildUserContent(text, attachments, true);
-      const messagesForServer = this.history
-          .slice()                                       // копия
-          .concat([{ role: "user", content: currentUserContent }]);
-
-      // 3. В history — без base64 (для следующих запросов и UI)
-      const historyContent = this._buildUserContent(text, attachments, false);
-      this.history.push({ role: "user", content: historyContent });
+      const messagesForServer = this.history.slice().concat([{ role: "user", content: text }]);
+      this.history.push({ role: "user", content: text });
       this._pruneHistory();
 
-      // 4. UI: показываем ТОЛЬКО чистый текст + плашки файлов
-      UI.appendMessage(
-          this.els.messages,
-          text || "",
-          "outgoing",
-          UI.nowTime(),
-          attachments
-      );
+      // skipAttach: false — плагин сам вставит файлы перед отправкой.
+      // appendText: false — текст заменяет содержимое поля ввода.
+      await this._doStream(messagesForServer, text, {
+        files: filesData,
+        skipAttach: false,
+        appendText: false,
+      });
+    }
 
-      // 5. Пустой «incoming» под стрим
+    async _doStream(messagesForServer, outgoingText, opts = {}) {
+      this.busy = true;
+      if (this.els.emptyState) this.els.emptyState.classList.add("hidden");
+
+      UI.appendMessage(this.els.messages, outgoingText || "", "outgoing", UI.nowTime());
       const typing = UI.appendMessage(this.els.messages, "", "incoming", UI.nowTime());
       typing.textContent = "";
       UI.setTyping(typing, true);
@@ -197,8 +135,12 @@
       let accThought = "";
       let thoughtEl = null;
 
-      // 6. Запускаем стрим
-      const stream = this.api.chatStream(messagesForServer);
+      const stream = this.api.chatStream(messagesForServer, {
+        skipAttach: !!opts.skipAttach,
+        appendText: !!opts.appendText,
+        files: opts.files || [],   // ← новое: передаём файлы в /api/chat
+      });
+
       this.currentStream = stream;
       this._updateStopBtn(true);
       this._startWatchdog();
@@ -209,7 +151,6 @@
           if (!thoughtEl) {
             thoughtEl = UI.appendMessage(this.els.messages, "", "thought", "");
             thoughtEl.textContent = "";
-            // Вставляем ПЕРЕД «incoming»
             const row = thoughtEl.parentNode;
             if (typing.parentNode && typing.parentNode.parentNode === this.els.messages) {
               this.els.messages.insertBefore(row, typing.parentNode);
@@ -228,11 +169,8 @@
         this._stopWatchdog();
         UI.setTyping(typing, false);
         if (!accResponse) UI.updateTypingText(typing, "(пустой ответ)");
-
-        // В history — без base64 (только текст ответа)
         this.history.push({ role: "assistant", content: accResponse });
         this._pruneHistory();
-
         this._finish();
         UI.initCopyButtons(typing);
         if (thoughtEl) UI.initCopyButtons(thoughtEl);
@@ -245,100 +183,39 @@
           const row = typing.parentNode;
           if (row && row.parentNode) row.parentNode.removeChild(row);
         }
-        UI.appendMessage(
-            this.els.messages,
-            "Ошибка: " + (err && err.message ? err.message : String(err)),
-            "error"
-        );
+        UI.appendMessage(this.els.messages, "Ошибка: " + (err && err.message ? err.message : String(err)), "error");
         this._finish();
       });
     }
 
-    // ----------------------------------------------------------
-    //  Watchdog: принудительно завершаем зависший стрим
-    // ----------------------------------------------------------
+    _pruneHistory() {
+      let total = 0;
+      for (let i = this.history.length - 1; i >= 0; i--) {
+        let len = 0;
+        try { len = JSON.stringify(this.history[i]).length; } catch (_) {}
+        total += len;
+        if (total > MAX_HISTORY_CHARS && i < this.history.length - 2) {
+          this.history = this.history.slice(i);
+          return;
+        }
+      }
+    }
+
     _startWatchdog() {
       this._stopWatchdog();
       this._watchdogTimer = setTimeout(() => {
-        console.warn("[chat] stream watchdog timeout, aborting");
-        if (this.currentStream) {
-          try { this.currentStream.abort(); } catch (_) {}
-        }
+        if (this.currentStream) { try { this.currentStream.abort(); } catch (_) {} }
         this.busy = false;
         this.currentStream = null;
         this._updateStopBtn(false);
-        UI.appendMessage(
-            this.els.messages,
-            "Стрим не завершился за 10 минут — прерван",
-            "error"
-        );
+        UI.appendMessage(this.els.messages, "Стрим не завершился за 10 минут — прерван", "error");
       }, STREAM_TIMEOUT_MS);
     }
 
     _stopWatchdog() {
-      if (this._watchdogTimer) {
-        clearTimeout(this._watchdogTimer);
-        this._watchdogTimer = null;
-      }
+      if (this._watchdogTimer) { clearTimeout(this._watchdogTimer); this._watchdogTimer = null; }
     }
 
-    // ----------------------------------------------------------
-    //  stop / resume / newChat
-    // ----------------------------------------------------------
-    async stop() {
-      try {
-        await this.api.stop();
-        UI.appendMessage(this.els.messages, "⏹ Остановлено", "system");
-      } catch (e) {
-        UI.appendMessage(this.els.messages, "Стоп: " + e.message, "error");
-      }
-    }
-
-    async resume() {
-      try {
-        await this.api.resume();
-        UI.appendMessage(this.els.messages, "▶ Продолжение…", "system");
-      } catch (e) {
-        UI.appendMessage(this.els.messages, "Продолжить: " + e.message, "error");
-      }
-    }
-
-    async newChat() {
-      try {
-        await this.api.newChat();
-
-        if (this.currentStream) {
-          try { this.currentStream.abort(); } catch (_) {}
-          this.currentStream = null;
-        }
-        this._stopWatchdog();
-        this.busy = false;
-        this._updateStopBtn(false);
-
-        this.history = [];
-        this.els.messages.innerHTML = "";
-
-        const el = document.createElement("div");
-        el.className = "empty-state";
-        el.innerHTML =
-            '<div class="empty-icon">💬</div>' +
-            '<div class="empty-title">Начните диалог</div>' +
-            '<div class="empty-sub">Отправьте сообщение, чтобы DeepSeek ответил</div>';
-        this.els.messages.appendChild(el);
-        this.els.emptyState = el;
-
-        if (this.els.composer) {
-          this.els.composer.value = "";
-          this.els.composer.style.height = "auto";
-        }
-      } catch (e) {
-        UI.appendMessage(this.els.messages, "Новый чат: " + e.message, "error");
-      }
-    }
-
-    // ----------------------------------------------------------
-    //  helpers
-    // ----------------------------------------------------------
     _finish() {
       this._stopWatchdog();
       this.busy = false;

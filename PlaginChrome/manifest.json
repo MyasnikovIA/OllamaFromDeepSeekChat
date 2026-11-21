@@ -1,9 +1,15 @@
 {
   "manifest_version": 3,
   "name": "DeepSeek Stream Interceptor",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "Перехват стрима DeepSeek + мост EventSource + эмуляция Ollama API.",
-  "permissions": ["tabs", "scripting", "storage"],
+  "permissions": [
+    "tabs",
+    "scripting",
+    "storage",
+    "clipboardRead",
+    "clipboardWrite"
+  ],
   "host_permissions": ["https://chat.deepseek.com/*"],
   "content_scripts": [
     {

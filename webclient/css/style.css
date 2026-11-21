@@ -432,7 +432,7 @@ input, textarea { font-family: inherit; }
 }
 
 /* ==========================================================
-   Плашки прикреплённых файлов (улучшено)
+   Плашки прикреплённых файлов (внутри сообщений)
    ========================================================== */
 .attached-files {
   display: flex; flex-direction: column;
@@ -610,6 +610,74 @@ input, textarea { font-family: inherit; }
   pointer-events: none;
 }
 
+/* ==========================================================
+   Pending Files List (Чипы файлов над composer)
+   ========================================================== */
+.pending-files-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 8%;
+  background: var(--bg-composer);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.pending-file-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 4px 10px;
+  font-size: 12px;
+  box-shadow: var(--shadow);
+  transition: background .15s, opacity .15s;
+}
+
+.pending-file-chip.sent {
+  opacity: 0.6;
+  background: #f0f2f5;
+}
+
+.pending-file-chip .file-name {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+.pending-file-chip .file-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.btn-chip-send, .btn-chip-remove {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px;
+  font-size: 14px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  transition: background .15s, color .15s;
+}
+
+.btn-chip-send:hover { color: var(--green); background: rgba(0,168,132,.1); }
+.btn-chip-remove:hover { color: var(--red); background: rgba(229,67,53,.1); }
+
+.sent-mark {
+  color: var(--green);
+  font-weight: bold;
+  font-size: 12px;
+}
+
 /* ---------- Скроллбары ---------- */
 .messages::-webkit-scrollbar, .tabs-list::-webkit-scrollbar { width: 8px; }
 .messages::-webkit-scrollbar-thumb, .tabs-list::-webkit-scrollbar-thumb {
@@ -628,4 +696,5 @@ input, textarea { font-family: inherit; }
   .messages { padding: 16px 4%; }
   .composer { padding: 10px 4%; }
   .message { max-width: 88%; }
+  .pending-files-list { padding: 10px 4%; }
 }

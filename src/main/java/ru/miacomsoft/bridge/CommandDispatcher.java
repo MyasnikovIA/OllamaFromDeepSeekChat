@@ -1,5 +1,7 @@
 package ru.miacomsoft.bridge;
 
+import org.json.JSONObject;
+
 import java.util.Collections;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
@@ -22,6 +24,7 @@ public final class CommandDispatcher {
     private static volatile long    lastActivityAt      = System.currentTimeMillis();
 
     private static volatile String activeServingTabId = null;
+    private static volatile String activeCommandType  = null;
 
     private static final Object streamLock = new Object();
     private static final Set<String> rejectedStreams =
@@ -49,6 +52,13 @@ public final class CommandDispatcher {
         activeIsChatCommand = cmd.isChatCommand;
         activeServingTabId = c.tabId;
         lastActivityAt = System.currentTimeMillis();
+
+        try {
+            activeCommandType = new JSONObject(cmd.json).optString("type", "");
+        } catch (Exception e) {
+            activeCommandType = null;
+        }
+
         c.queue.offer(cmd.json);
     }
 
@@ -62,14 +72,30 @@ public final class CommandDispatcher {
     public static void watchdogTick() {
         if (awaitingResponse
                 && System.currentTimeMillis() - lastActivityAt > BridgeConstants.WATCHDOG_TIMEOUT_MS) {
-            StreamListener l = activeListener;
-            activeListener = null;
-            awaitingResponse = false;
-            activeFromStdin = false;
-            activeIsChatCommand = false;
-            activeServingTabId = null;
+
+            StreamListener l;
+            boolean wasStdin;
+
+            synchronized (streamLock) {
+                l = activeListener;
+                wasStdin = activeFromStdin;
+                activeListener = null;
+                awaitingResponse = false;
+                activeFromStdin = false;
+                activeIsChatCommand = false;
+                activeServingTabId = null;
+                activeStreamId   = null;
+                activeStreamType = null;
+                activeCommandType = null;
+            }
+
             if (l != null) {
                 try { l.onError("watchdog timeout"); } catch (Exception ignored) {}
+            } else if (wasStdin) {
+                ConsoleWriter.get().ensureNewline();
+                System.out.println("[!] watchdog timeout");
+                System.out.print("> ");
+                System.out.flush();
             }
             trySendNext();
         }
@@ -82,6 +108,7 @@ public final class CommandDispatcher {
         if (sid.isEmpty()) return;
 
         ConsoleWriter cw = ConsoleWriter.get();
+        StreamListener l;
 
         synchronized (streamLock) {
             if (rejectedStreams.contains(sid)) return;
@@ -100,11 +127,16 @@ public final class CommandDispatcher {
                 activeStreamType = sType;
             }
             cw.appendStreamText(text);
+
+            l = activeListener;
         }
 
-        StreamListener l = activeListener;
         if (l != null) {
-            try { l.onChunk(text, sType); } catch (Exception ignored) {}
+            try {
+                l.onChunk(text, sType);
+            } catch (Exception e) {
+                System.err.println("[DISPATCHER] listener.onChunk failed: " + e.getMessage());
+            }
         }
     }
 
@@ -131,11 +163,14 @@ public final class CommandDispatcher {
                 awaitingResponse = false;
                 activeFromStdin = false;
                 activeIsChatCommand = false;
+                activeCommandType = null;
             }
         }
 
         if (l != null) {
-            try { l.onDone(); } catch (Exception ignored) {}
+            try { l.onDone(); } catch (Exception e) {
+                System.err.println("[DISPATCHER] listener.onDone failed: " + e.getMessage());
+            }
         }
 
         trySendNext();
@@ -152,20 +187,34 @@ public final class CommandDispatcher {
     // ============================================================
     public static void onResult(String text) {
         if (text == null) text = "";
-        if (text.startsWith("sent:")) return;  // send → стрим идёт отдельно
+        if (text.startsWith("sent:")) return;
 
-        StreamListener l = activeListener;
-        activeListener = null;
-        awaitingResponse = false;
-        activeFromStdin = false;
-        activeIsChatCommand = false;
-        activeServingTabId = null;
+        // ФИКС: если это команда 'send', игнорируем промежуточные 'result'
+        // (например, "файлы прикреплены"), чтобы они не обрывали слушателя API.
+        // Финальный ответ всегда приходит через onStreamDone().
+        if ("send".equals(activeCommandType)) {
+            return;
+        }
+
+        StreamListener l;
+        synchronized (streamLock) {
+            l = activeListener;
+            activeListener = null;
+            awaitingResponse = false;
+            activeFromStdin = false;
+            activeIsChatCommand = false;
+            activeServingTabId = null;
+            activeStreamId   = null;
+            activeStreamType = null;
+            activeCommandType = null;
+        }
 
         ConsoleWriter.get().ensureNewline();
 
         if (l != null) {
-            // ← ИСПРАВЛЕНО: result = успех, поэтому onDone(), а не onError()
-            try { l.onDone(); } catch (Exception ignored) {}
+            try { l.onDone(); } catch (Exception e) {
+                System.err.println("[DISPATCHER] listener.onDone failed: " + e.getMessage());
+            }
         } else {
             System.out.println("✓ " + text);
             System.out.print("> ");
@@ -179,12 +228,18 @@ public final class CommandDispatcher {
     //  /log: error — реальная ошибка
     // ============================================================
     public static void onError(String text) {
-        StreamListener l = activeListener;
-        activeListener = null;
-        awaitingResponse = false;
-        activeFromStdin = false;
-        activeIsChatCommand = false;
-        activeServingTabId = null;
+        StreamListener l;
+        synchronized (streamLock) {
+            l = activeListener;
+            activeListener = null;
+            awaitingResponse = false;
+            activeFromStdin = false;
+            activeIsChatCommand = false;
+            activeServingTabId = null;
+            activeStreamId   = null;
+            activeStreamType = null;
+            activeCommandType = null;
+        }
 
         ConsoleWriter.get().ensureNewline();
 
@@ -195,7 +250,9 @@ public final class CommandDispatcher {
         System.out.flush();
 
         if (l != null) {
-            try { l.onError(text); } catch (Exception ignored) {}
+            try { l.onError(text); } catch (Exception e) {
+                System.err.println("[DISPATCHER] listener.onError failed: " + e.getMessage());
+            }
         }
         trySendNext();
     }
@@ -219,18 +276,24 @@ public final class CommandDispatcher {
         boolean wasServing = tabId.equals(activeServingTabId);
 
         if (wasServing) {
-            StreamListener l = activeListener;
-            boolean wasStdin = activeFromStdin;
-            activeListener = null;
-            awaitingResponse = false;
-            activeFromStdin = false;
-            activeIsChatCommand = false;
-            activeServingTabId = null;
-            activeStreamId = null;
-            activeStreamType = null;
+            StreamListener l;
+            boolean wasStdin;
+            synchronized (streamLock) {
+                l = activeListener;
+                wasStdin = activeFromStdin;
+                activeListener = null;
+                awaitingResponse = false;
+                activeFromStdin = false;
+                activeIsChatCommand = false;
+                activeServingTabId = null;
+                activeStreamId = null;
+                activeStreamType = null;
+                activeCommandType = null;
+            }
 
             if (l != null) {
-                try { l.onError("tab closed: " + BridgeUtils.shortId(tabId)); } catch (Exception ignored) {}
+                try { l.onError("tab closed: " + BridgeUtils.shortId(tabId)); }
+                catch (Exception ignored) {}
             } else if (wasStdin) {
                 ConsoleWriter.get().ensureNewline();
                 System.out.println("[!] tab closed: " + BridgeUtils.shortId(tabId));
@@ -269,6 +332,7 @@ public final class CommandDispatcher {
                 activeServingTabId = null;
                 activeStreamId = null;
                 activeStreamType = null;
+                activeCommandType = null;
             }
         }
 

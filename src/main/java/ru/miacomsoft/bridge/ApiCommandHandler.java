@@ -10,25 +10,24 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * POST /api/command
  *
- * Принимает JSON-команду, ставит её в CommandDispatcher и ждёт ответа.
- * Каждая команда ЭХОМ печатается в консоль сервера в формате stdin
- * ("> /think on", "> /stop", "> send: <текст>", "> /tabs", …),
- * чтобы оператор видел в консоли то же, что и при ручном вводе.
- *
  * Поддерживаемые type:
- *   send, eval, newChat,
- *   enableThinking, disableThinking,
+ *   send, sendWithAttached, detach,
+ *   attach, setText, appendText, clickSend,
+ *   clipboardAttach, clipboardCopy, clipboardPaste,
+ *   eval, newChat, enableThinking, disableThinking,
  *   enableSmartSearch, disableSmartSearch,
  *   stopGeneration, resumeGeneration,
  *   openTab, closeTab, closeAllTabs,
- *   tabs, state, tab, file, help, browsers, openBrowser
+ *   tabs, state, getState, tab, file, help, browsers, openBrowser
  */
 public final class ApiCommandHandler {
 
@@ -67,11 +66,135 @@ public final class ApiCommandHandler {
         switch (type) {
             case "send": {
                 String text = req.optString("text", "");
-                if (text.isEmpty()) { writeJson(ex, 400, errorObj("empty 'text'")); return; }
-                echo("send: " + text);
-                awaitCommand(ex, cmd("send").put("text", text), 120_000L);
+                JSONArray filesArr = req.optJSONArray("files");
+                boolean hasFiles = filesArr != null && filesArr.length() > 0;
+                if (text.isEmpty() && !hasFiles) {
+                    writeJson(ex, 400, errorObj("empty 'text' and no 'files'"));
+                    return;
+                }
+
+                boolean clip         = req.optBoolean("clipboard", false);
+                boolean strict       = req.optBoolean("strict", false);
+                boolean skipAttach   = req.optBoolean("skipAttach", false);
+                boolean setTextFirst = req.optBoolean("setTextFirst", true);
+
+                echo("send" + (clip ? " [clipboard]" : "")
+                        + (skipAttach ? " [skipAttach]" : "")
+                        + (strict ? " [strict]" : "")
+                        + ": " + text);
+
+                JSONObject c = cmd("send").put("text", text);
+                if (clip) c.put("clipboard", true);
+                if (strict) c.put("strict", true);
+                if (skipAttach) c.put("skipAttach", true);
+                if (!setTextFirst) c.put("setTextFirst", false);
+                if (filesArr != null) c.put("files", filesArr);
+
+                awaitCommand(ex, c, 180_000L);
                 return;
             }
+
+            // ===== sendWithAttached =====
+            case "sendWithAttached": {
+                String text = req.optString("text", "");
+                if (text.isEmpty()) {
+                    writeJson(ex, 400, errorObj("empty 'text'"));
+                    return;
+                }
+                echo("/sendwithattached " + text);
+
+                CompletableFuture<JSONObject> fut = new CompletableFuture<>();
+                StreamListener listener = new StreamListener() {
+                    @Override public void onChunk(String t, String st) { /* nope */ }
+                    @Override public void onDone() {
+                        fut.complete(new JSONObject().put("done", true).put("type", "sendWithAttached"));
+                    }
+                    @Override public void onError(String m) {
+                        fut.complete(errorObj(m));
+                    }
+                };
+                BridgeCommands.sendWithAttachedForApi(text, listener);
+
+                JSONObject result;
+                try {
+                    result = fut.get(180_000L, TimeUnit.MILLISECONDS);
+                } catch (TimeoutException te) {
+                    writeJson(ex, 504, errorObj("timeout waiting for sendWithAttached"));
+                    return;
+                }
+                if (result.optBoolean("done", false)) {
+                    writeJson(ex, 200, okObj(result));
+                } else {
+                    writeJson(ex, 500, result);
+                }
+                return;
+            }
+
+            // ===== detach =====
+            case "detach": {
+                echo("/detach");
+
+                CompletableFuture<JSONObject> fut = new CompletableFuture<>();
+                StreamListener listener = new StreamListener() {
+                    @Override public void onChunk(String t, String st) { /* nope */ }
+                    @Override public void onDone() {
+                        fut.complete(new JSONObject().put("done", true).put("type", "detach"));
+                    }
+                    @Override public void onError(String m) {
+                        fut.complete(errorObj(m));
+                    }
+                };
+                BridgeCommands.sendDetachForApi(listener);
+
+                JSONObject result;
+                try {
+                    result = fut.get(30_000L, TimeUnit.MILLISECONDS);
+                } catch (TimeoutException te) {
+                    writeJson(ex, 504, errorObj("timeout waiting for detach"));
+                    return;
+                }
+                if (result.optBoolean("done", false)) {
+                    writeJson(ex, 200, okObj(result));
+                } else {
+                    writeJson(ex, 500, result);
+                }
+                return;
+            }
+
+            case "attach": {
+                JSONArray filesArr = req.optJSONArray("files");
+                if (filesArr == null || filesArr.length() == 0) {
+                    writeJson(ex, 400, errorObj("empty 'files'"));
+                    return;
+                }
+                echo("/attach " + filesArr.length() + " file(s)");
+                JSONObject c = cmd("attach").put("files", filesArr);
+                awaitCommand(ex, c, 60_000L);
+                return;
+            }
+
+            case "setText": {
+                String text = req.optString("text", "");
+                if (text.isEmpty()) { writeJson(ex, 400, errorObj("empty 'text'")); return; }
+                echo("/settext " + text);
+                awaitCommand(ex, cmd("setText").put("text", text), 30_000L);
+                return;
+            }
+
+            case "appendText": {
+                String text = req.optString("text", "");
+                if (text.isEmpty()) { writeJson(ex, 400, errorObj("empty 'text'")); return; }
+                echo("/append " + text);
+                awaitCommand(ex, cmd("appendText").put("text", text), 30_000L);
+                return;
+            }
+
+            case "clickSend": {
+                echo("/clicksend");
+                awaitCommand(ex, cmd("clickSend"), 30_000L);
+                return;
+            }
+
             case "eval": {
                 String code = req.optString("code", "");
                 if (code.isEmpty()) { writeJson(ex, 400, errorObj("empty 'code'")); return; }
@@ -123,6 +246,25 @@ public final class ApiCommandHandler {
                 writeJson(ex, 200, okObj(new JSONObject().put("queued", true)));
                 return;
             }
+            case "clipboardAttach":
+            case "clipboardCopy": {
+                List<Attachment> atts = parseAttachments(req, ex);
+                if (atts == null) return;
+                if (atts.isEmpty()) {
+                    writeJson(ex, 400, errorObj("empty 'files' (or 'path') for " + type));
+                    return;
+                }
+                echo("clipboardAttach".equals(type)
+                        ? "/clipattach " + atts.size() + " file(s)"
+                        : "/clipcopy " + atts.size() + " file(s)");
+                awaitClipboardCommand(ex, type, atts);
+                return;
+            }
+            case "clipboardPaste": {
+                echo("/clippaste");
+                awaitClipboardCommand(ex, "clipboardPaste", null);
+                return;
+            }
             case "openTab": {
                 String url = req.optString("url", "https://chat.deepseek.com/");
                 boolean active = req.optBoolean("active", true);
@@ -136,8 +278,7 @@ public final class ApiCommandHandler {
                 String tabId = req.optString("tabId", "");
                 if (tabId.isEmpty()) { writeJson(ex, 400, errorObj("empty 'tabId'")); return; }
                 echo("/close " + tabId);
-                JSONObject c = cmd("closeTab").put("tabId", tabId);
-                BridgeCommands.sendFireAndForget(c.toString(), null);
+                BridgeCommands.sendFireAndForget(cmd("closeTab").put("tabId", tabId).toString(), null);
                 writeJson(ex, 200, okObj(new JSONObject().put("queued", true).put("tabId", tabId)));
                 return;
             }
@@ -153,7 +294,8 @@ public final class ApiCommandHandler {
                 writeJson(ex, 200, okObj(TabRegistry.toJson()));
                 return;
             }
-            case "state": {
+            case "state":
+            case "getState": {
                 echo("/state");
                 TabRegistry.printState();
                 JSONObject resp = new JSONObject();
@@ -177,11 +319,8 @@ public final class ApiCommandHandler {
                 if (target.isEmpty()) { writeJson(ex, 400, errorObj("empty 'tabId'")); return; }
                 echo("/tab " + target);
                 boolean ok;
-                if (target.matches("\\d+")) {
-                    ok = TabRegistry.selectTabByIndex(Integer.parseInt(target));
-                } else {
-                    ok = TabRegistry.selectTabById(target) || TabRegistry.selectTabByPrefix(target);
-                }
+                if (target.matches("\\d+")) ok = TabRegistry.selectTabByIndex(Integer.parseInt(target));
+                else                         ok = TabRegistry.selectTabById(target) || TabRegistry.selectTabByPrefix(target);
                 ConsoleWriter.get().ensureNewline();
                 System.out.println("[TAB] selected: " + (ok ? "yes" : "no") + " (" + target + ")");
                 System.out.print("> "); System.out.flush();
@@ -211,10 +350,7 @@ public final class ApiCommandHandler {
             }
             case "openBrowser": {
                 int index = req.optInt("index", -1);
-                if (index < 0) {
-                    writeJson(ex, 400, errorObj("missing or invalid 'index'"));
-                    return;
-                }
+                if (index < 0) { writeJson(ex, 400, errorObj("missing or invalid 'index'")); return; }
                 echo("/openbrowser " + index);
                 BridgeCommands.launchBrowserFromStdin(index);
                 writeJson(ex, 200, okObj(new JSONObject().put("queued", true).put("index", index)));
@@ -224,22 +360,31 @@ public final class ApiCommandHandler {
                 echo("/help");
                 JSONObject help = new JSONObject();
                 JSONArray cmds = new JSONArray();
-                cmds.put("send     → {type:\"send\", text:\"...\"}");
-                cmds.put("eval     → {type:\"eval\", code:\"...\"}");
-                cmds.put("newChat  → {type:\"newChat\"}");
-                cmds.put("thinking → {type:\"enableThinking\"|\"disableThinking\"}");
-                cmds.put("search   → {type:\"enableSmartSearch\"|\"disableSmartSearch\"}");
-                cmds.put("stop     → {type:\"stopGeneration\"}");
-                cmds.put("resume   → {type:\"resumeGeneration\"}");
-                cmds.put("openTab  → {type:\"openTab\", url?, active?}");
-                cmds.put("closeTab → {type:\"closeTab\", tabId:\"...\"}");
-                cmds.put("closeAll → {type:\"closeAllTabs\"}");
-                cmds.put("tabs     → {type:\"tabs\"}");
-                cmds.put("state    → {type:\"state\"}");
-                cmds.put("tab      → {type:\"tab\", tabId:\"#n|id|prefix\"}");
-                cmds.put("file     → {type:\"file\", path:\"...\", text?}");
-                cmds.put("browsers → {type:\"browsers\"}");
-                cmds.put("openBrws → {type:\"openBrowser\", index:0}");
+                cmds.put("send          → {type:\"send\", text?, files?, clipboard?, strict?, skipAttach?, setTextFirst?}");
+                cmds.put("sendAttached  → {type:\"sendWithAttached\", text}");
+                cmds.put("detach        → {type:\"detach\"}");
+                cmds.put("attach        → {type:\"attach\", files:[...]}");
+                cmds.put("setText       → {type:\"setText\", text:\"...\"}");
+                cmds.put("appendText    → {type:\"appendText\", text:\"...\"}");
+                cmds.put("clickSend     → {type:\"clickSend\"}");
+                cmds.put("clipAttach    → {type:\"clipboardAttach\", files:[...]|path:\"...\"}");
+                cmds.put("clipCopy      → {type:\"clipboardCopy\", files:[...]|path:\"...\"}");
+                cmds.put("clipPaste     → {type:\"clipboardPaste\"}");
+                cmds.put("eval          → {type:\"eval\", code:\"...\"}");
+                cmds.put("newChat       → {type:\"newChat\"}");
+                cmds.put("thinking      → {type:\"enableThinking\"|\"disableThinking\"}");
+                cmds.put("search        → {type:\"enableSmartSearch\"|\"disableSmartSearch\"}");
+                cmds.put("stop          → {type:\"stopGeneration\"}");
+                cmds.put("resume        → {type:\"resumeGeneration\"}");
+                cmds.put("openTab       → {type:\"openTab\", url?, active?}");
+                cmds.put("closeTab      → {type:\"closeTab\", tabId:\"...\"}");
+                cmds.put("closeAll      → {type:\"closeAllTabs\"}");
+                cmds.put("tabs          → {type:\"tabs\"}");
+                cmds.put("state         → {type:\"state\"| \"getState\"}");
+                cmds.put("tab           → {type:\"tab\", tabId:\"#n|id|prefix\"}");
+                cmds.put("file          → {type:\"file\", path:\"...\", text?}");
+                cmds.put("browsers      → {type:\"browsers\"}");
+                cmds.put("openBrowser   → {type:\"openBrowser\", index:0}");
                 help.put("endpoints", new JSONArray()
                         .put("POST /api/command")
                         .put("GET  /tabs")
@@ -256,8 +401,6 @@ public final class ApiCommandHandler {
     // ============================================================
     //  helpers
     // ============================================================
-
-    /** Эхо команды в консоль сервера — как будто её ввели через stdin. */
     private static void echo(String line) {
         ConsoleWriter cw = ConsoleWriter.get();
         cw.ensureNewline();
@@ -265,14 +408,12 @@ public final class ApiCommandHandler {
         System.out.flush();
     }
 
-    /** Создать JSONObject команды с заданным type. */
     private static JSONObject cmd(String type) {
         JSONObject o = new JSONObject();
         o.put("type", type);
         return o;
     }
 
-    /** Кладёт команду в очередь и блокируется до onDone/onError. */
     private static void awaitCommand(HttpExchange ex, JSONObject cmdObj, long timeoutMs) throws Exception {
         CompletableFuture<JSONObject> fut = new CompletableFuture<>();
 
@@ -286,13 +427,12 @@ public final class ApiCommandHandler {
             }
         };
 
-        // fromStdin=true → CommandDispatcher напечатает "> " после onStreamDone.
         CommandDispatcher.enqueue(new PendingCommand(cmdObj.toString(), listener, true, true));
 
         JSONObject result;
         try {
             result = fut.get(timeoutMs, TimeUnit.MILLISECONDS);
-        } catch (java.util.concurrent.TimeoutException te) {
+        } catch (TimeoutException te) {
             writeJson(ex, 504, errorObj("timeout waiting for command result"));
             return;
         }
@@ -302,6 +442,72 @@ public final class ApiCommandHandler {
         } else {
             writeJson(ex, 500, result);
         }
+    }
+
+    private static void awaitClipboardCommand(HttpExchange ex,
+                                              String type,
+                                              List<Attachment> atts) throws Exception {
+        CompletableFuture<JSONObject> fut = new CompletableFuture<>();
+
+        StreamListener listener = new StreamListener() {
+            @Override public void onChunk(String text, String streamType) { /* не нужно */ }
+            @Override public void onDone() {
+                fut.complete(new JSONObject().put("done", true).put("type", type));
+            }
+            @Override public void onError(String message) {
+                fut.complete(errorObj(message));
+            }
+        };
+
+        BridgeCommands.sendClipboardCommand(type, atts, listener);
+
+        JSONObject result;
+        try {
+            result = fut.get(120_000L, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException te) {
+            writeJson(ex, 504, errorObj("timeout waiting for clipboard result"));
+            return;
+        }
+
+        if (result.optBoolean("done", false)) {
+            writeJson(ex, 200, okObj(result));
+        } else {
+            writeJson(ex, 500, result);
+        }
+    }
+
+    private static List<Attachment> parseAttachments(JSONObject req, HttpExchange ex) throws IOException {
+        List<Attachment> atts = new ArrayList<>();
+
+        JSONArray filesArr = req.optJSONArray("files");
+        if (filesArr != null) {
+            for (int i = 0; i < filesArr.length(); i++) {
+                JSONObject f = filesArr.optJSONObject(i);
+                if (f == null) continue;
+                String name = f.optString("name", "file.bin");
+                String mime = f.optString("mimeType", f.optString("mime", "application/octet-stream"));
+                String b64  = f.optString("dataBase64", "");
+                if (b64.isEmpty()) {
+                    writeJson(ex, 400, errorObj("file #" + i + " has empty dataBase64"));
+                    return null;
+                }
+                atts.add(new Attachment(name, mime, b64));
+            }
+            return atts;
+        }
+
+        String path = req.optString("path", "").trim();
+        if (!path.isEmpty()) {
+            Attachment a = BridgeCommands.readFileAttachmentForApi(path);
+            if (a == null) {
+                writeJson(ex, 404, errorObj("file not found or unreadable: " + path));
+                return null;
+            }
+            atts.add(a);
+            return atts;
+        }
+
+        return atts;
     }
 
     static void writeJson(HttpExchange ex, int status, JSONObject obj) throws IOException {

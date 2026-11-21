@@ -139,6 +139,9 @@ public class Main {
         System.out.println("  /stop                → остановить текущую генерацию");
         System.out.println("  /resume              → продолжить остановленную генерацию");
         System.out.println("  /file <path> [text]  → отправить файл в DeepSeek");
+        System.out.println("  /clipattach <path>   → прикрепить файл через буфер обмена (для больших текстов)");
+        System.out.println("  /clipcopy   <path>   → скопировать файл в буфер обмена (без вставки)");
+        System.out.println("  /clippaste           → вставить содержимое буфера в поле ввода (алиас: /cp)");
         System.out.println("  /tabs                → список открытых вкладок DeepSeek");
         System.out.println("  /tab <n|id>          → выбрать вкладку");
         System.out.println("  /opentab [url]       → открыть новую вкладку DeepSeek");
@@ -221,6 +224,9 @@ public class Main {
             return;
         }
 
+        // ============================================================
+        //  /file <path> [text]
+        // ============================================================
         if (trimmed.startsWith("/file ")) {
             String rest = trimmed.substring("/file ".length()).trim();
             if (rest.isEmpty()) {
@@ -228,37 +234,57 @@ public class Main {
                 System.out.print("> "); System.out.flush();
                 return;
             }
-            String path;
-            String text = "";
-            if (rest.startsWith("\"")) {
-                int end = rest.indexOf('"', 1);
-                if (end > 0) {
-                    path = rest.substring(1, end);
-                    text = rest.substring(end + 1).trim();
-                } else {
-                    path = rest.substring(1);
-                }
-            } else if (rest.startsWith("'")) {
-                int end = rest.indexOf('\'', 1);
-                if (end > 0) {
-                    path = rest.substring(1, end);
-                    text = rest.substring(end + 1).trim();
-                } else {
-                    path = rest.substring(1);
-                }
-            } else {
-                int sp = rest.indexOf(' ');
-                if (sp < 0) {
-                    path = rest;
-                } else {
-                    path = rest.substring(0, sp);
-                    text = rest.substring(sp + 1).trim();
-                }
-            }
+            String[] pt = parsePathAndRest(rest);
+            String path = pt[0];
+            String text = pt[1];
 
             SessionManager.addMessage("user",
                     "Отправлен файл: " + path + (text.isEmpty() ? "" : " | Текст: " + text));
             BridgeCommands.sendFileFromStdin(path, text);
+            return;
+        }
+
+        // ============================================================
+        //  /clipattach <path>  — прикрепить через буфер обмена
+        // ============================================================
+        if (trimmed.startsWith("/clipattach ")) {
+            String rest = trimmed.substring("/clipattach ".length()).trim();
+            if (rest.isEmpty()) {
+                System.out.println("[CLIPATTACH] usage: /clipattach <path>");
+                System.out.print("> "); System.out.flush();
+                return;
+            }
+            String[] pt = parsePathAndRest(rest);
+            String path = pt[0];
+
+            SessionManager.addMessage("user", "Clipboard-attach: " + path);
+            BridgeCommands.sendClipboardAttachFromStdin(path);
+            return;
+        }
+
+        // ============================================================
+        //  /clipcopy <path>  — только скопировать в буфер обмена
+        // ============================================================
+        if (trimmed.startsWith("/clipcopy ")) {
+            String rest = trimmed.substring("/clipcopy ".length()).trim();
+            if (rest.isEmpty()) {
+                System.out.println("[CLIPCOPY] usage: /clipcopy <path>");
+                System.out.print("> "); System.out.flush();
+                return;
+            }
+            String[] pt = parsePathAndRest(rest);
+            String path = pt[0];
+
+            BridgeCommands.sendClipboardCopyFromStdin(path);
+            return;
+        }
+
+        // ============================================================
+        //  /clippaste — вставить из буфера в composer
+        //  (алиас: /cp)
+        // ============================================================
+        if (trimmed.equals("/clippaste") || trimmed.equals("/cp")) {
+            BridgeCommands.sendClipboardPasteFromStdin();
             return;
         }
 
@@ -341,5 +367,47 @@ public class Main {
 
         SessionManager.addMessage("user", line);
         BridgeCommands.sendFromStdin(line);
+    }
+
+    // ============================================================
+    //  Парсер "path [text]" с поддержкой кавычек.
+    //
+    //  Примеры:
+    //    "C:\file.txt"  текст       → path=C:\file.txt, text=текст
+    //    '/tmp/a b.txt' текст       → path=/tmp/a b.txt, text=текст
+    //    /tmp/file.txt some text    → path=/tmp/file.txt, text=some text
+    //    /tmp/file.txt              → path=/tmp/file.txt, text=""
+    // ============================================================
+    static String[] parsePathAndRest(String rest) {
+        if (rest == null || rest.isEmpty()) return new String[]{ "", "" };
+
+        if (rest.startsWith("\"")) {
+            int end = rest.indexOf('"', 1);
+            if (end > 0) {
+                return new String[]{
+                        rest.substring(1, end),
+                        rest.substring(end + 1).trim()
+                };
+            }
+            return new String[]{ rest.substring(1), "" };
+        }
+
+        if (rest.startsWith("'")) {
+            int end = rest.indexOf('\'', 1);
+            if (end > 0) {
+                return new String[]{
+                        rest.substring(1, end),
+                        rest.substring(end + 1).trim()
+                };
+            }
+            return new String[]{ rest.substring(1), "" };
+        }
+
+        int sp = rest.indexOf(' ');
+        if (sp < 0) return new String[]{ rest, "" };
+        return new String[]{
+                rest.substring(0, sp),
+                rest.substring(sp + 1).trim()
+        };
     }
 }

@@ -111,17 +111,13 @@
             const event = buffer.slice(0, idx);
             buffer = buffer.slice(idx + 2);
             for (const line of event.split("\n")) {
-              if (line.startsWith("data:")) {
-                emit(line, "sse", streamId);
-              }
+              if (line.startsWith("data:")) emit(line, "sse", streamId);
             }
           }
         }
         if (buffer.trim()) {
           for (const line of buffer.split("\n")) {
-            if (line.startsWith("data:")) {
-              emit(line, "sse", streamId);
-            }
+            if (line.startsWith("data:")) emit(line, "sse", streamId);
           }
         }
       } catch (err) {
@@ -159,16 +155,14 @@
       const fresh = text.slice(offset);
       offset = text.length;
       for (const line of fresh.split("\n")) {
-        if (line.startsWith("data:")) {
-          emit(line, "sse", streamId);
-        }
+        if (line.startsWith("data:")) emit(line, "sse", streamId);
       }
     });
 
     xhr.addEventListener("loadend", () => {
       if (target && streamId) {
         emit("", "done", streamId);
-        streamId = null;  // ===== ИЗМЕНЕНО: сброс =====
+        streamId = null;
         target = false;
       }
     });
@@ -207,15 +201,12 @@
   }
 
   // ============================================================
-  //  Устойчивый поиск поля ввода чата (RU / EN / любой textarea)
+  //  Устойчивый поиск поля ввода чата
   // ============================================================
   const KNOWN_PLACEHOLDERS = [
-    "Message DeepSeek",
-    "Сообщение для DeepSeek",
-    "Send a message",
-    "Написать сообщение",
-    "Type a message",
-    "Введите сообщение"
+    "Message DeepSeek", "Сообщение для DeepSeek",
+    "Send a message", "Написать сообщение",
+    "Type a message", "Введите сообщение"
   ];
 
   function isVisible(el) {
@@ -223,7 +214,6 @@
     if (el.offsetParent === null && el.getClientRects().length === 0) return false;
     const r = el.getBoundingClientRect();
     if (r.width <= 0 || r.height <= 0) return false;
-    // ===== ИЗМЕНЕНО: отсекаем скрытые/невидимые =====
     try {
       const cs = getComputedStyle(el);
       if (cs.visibility === "hidden" || cs.display === "none") return false;
@@ -235,21 +225,16 @@
 
   function findChatInputSync() {
     for (const ph of KNOWN_PLACEHOLDERS) {
-      const el = document.querySelector(
-          'textarea[placeholder="' + ph.replace(/"/g, '\\"') + '"]'
-      );
+      const el = document.querySelector('textarea[placeholder="' + ph.replace(/"/g, '\\"') + '"]');
       if (isVisible(el)) return el;
     }
-    const byPlaceholder = document.querySelectorAll('textarea[placeholder]');
-    for (const el of byPlaceholder) {
+    for (const el of document.querySelectorAll('textarea[placeholder]')) {
       if (isVisible(el)) return el;
     }
-    const textareas = document.querySelectorAll('textarea');
-    for (const el of textareas) {
+    for (const el of document.querySelectorAll('textarea')) {
       if (isVisible(el)) return el;
     }
-    const editables = document.querySelectorAll('[contenteditable="true"]');
-    for (const el of editables) {
+    for (const el of document.querySelectorAll('[contenteditable="true"]')) {
       if (isVisible(el)) return el;
     }
     return null;
@@ -266,7 +251,7 @@
   }
 
   // ============================================================
-  //  МАРКЕРЫ ФАЙЛОВ
+  //  МАРКЕРЫ ФАЙЛОВ (legacy)
   // ============================================================
   const FILE_MARKER_RE =
       /<!--DSFILE:BEGIN([^>]*)-->([\s\S]*?)<!--DSFILE:END-->/g;
@@ -276,9 +261,7 @@
     const re = /(\w+)=(?:"([^"]*)"|(\S+))/g;
     let m;
     while ((m = re.exec(raw)) !== null) {
-      const key = m[1];
-      const val = m[2] !== undefined ? m[2] : m[3];
-      attrs[key] = val;
+      attrs[m[1]] = m[2] !== undefined ? m[2] : m[3];
     }
     return attrs;
   }
@@ -316,20 +299,36 @@
     });
   }
 
+  function base64ToText(b64) {
+    try {
+      const bytes = base64ToBytes(b64);
+      return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function isProbablyTextMime(mime, name) {
+    const m = (mime || "").toLowerCase();
+    const n = (name || "").toLowerCase();
+    if (/^text\//.test(m)) return true;
+    if (/application\/(json|xml|x-yaml|javascript|typescript)/.test(m)) return true;
+    if (/\.(txt|md|markdown|json|csv|tsv|log|xml|html?|js|mjs|ts|jsx|tsx|py|java|c|h|cpp|hpp|cs|go|rs|rb|php|css|scss|sass|yml|yaml|ini|cfg|conf|toml|sh|bat|ps1|sql|env)$/.test(n)) return true;
+    return false;
+  }
+
   // ============================================================
-  //  Вставка файлов в DeepSeek через input[type=file] + DataTransfer
+  //  Чипы файлов (attach / detach / проверка)
   // ============================================================
   const ATTACHMENT_CHIP_SELECTORS = [
-    '[class*="file-chip"]',
-    '[class*="fileCard"]',
-    '[class*="file-card"]',
-    '[class*="file-preview"]',
-    '[class*="filePreview"]',
-    '[class*="file-item"]',
-    '[class*="fileItem"]',
-    '[class*="attachment"]',
-    '[class*="attached-file"]',
+    '[class*="file-chip"]', '[class*="fileCard"]', '[class*="file-card"]',
+    '[class*="file-preview"]', '[class*="filePreview"]', '[class*="file-item"]',
+    '[class*="fileItem"]', '[class*="attachment"]', '[class*="attached-file"]',
   ].join(",");
+
+  function countAttachmentChips() {
+    return document.querySelectorAll(ATTACHMENT_CHIP_SELECTORS).length;
+  }
 
   async function findFileInput(timeout = 5000) {
     let input = document.querySelector('input[type="file"]');
@@ -352,10 +351,6 @@
     return await waitForElement('input[type="file"]', timeout);
   }
 
-  function countAttachmentChips() {
-    return document.querySelectorAll(ATTACHMENT_CHIP_SELECTORS).length;
-  }
-
   async function waitForAttachments(expected, timeoutMs = 30000) {
     const start = Date.now();
     let sawProgress = false;
@@ -372,12 +367,10 @@
         continue;
       }
       if (sawProgress && Date.now() - lastProgressAt > 800) {
-        const chips = countAttachmentChips();
-        if (chips >= expected) return true;
+        if (countAttachmentChips() >= expected) return true;
       }
-      const chips = countAttachmentChips();
-      if (chips >= expected) {
-        console.log("[DS-MARKER] attachments ready:", chips, "/", expected);
+      if (countAttachmentChips() >= expected) {
+        console.log("[DS-MARKER] attachments ready:", countAttachmentChips(), "/", expected);
         return true;
       }
       await sleep(300);
@@ -386,28 +379,18 @@
     return false;
   }
 
-  /**
-   * ===== ИЗМЕНЕНО: отдельная функция attachFiles =====
-   * Вставляет массив файлов в input[type=file] DeepSeek.
-   * @returns {Promise<boolean>} true если чипы файлов появились
-   */
   async function attachFiles(files) {
     if (!files || files.length === 0) return true;
-
     const input = await findFileInput(8000);
     if (!input) {
       console.error("[DS-MARKER] input[type=file] not found");
       return false;
     }
-
     if (files.length > 1 && !input.multiple) {
       try { input.multiple = true; } catch (_) {}
     }
-
     const dt = new DataTransfer();
-    for (const f of files) {
-      dt.items.add(base64ToFile(f));
-    }
+    for (const f of files) dt.items.add(base64ToFile(f));
 
     let assigned = false;
     try {
@@ -416,79 +399,218 @@
     } catch (e) {
       console.warn("[DS-MARKER] native setter failed:", e);
     }
-
     if (!assigned) {
       try {
-        Object.defineProperty(input, "files", {
-          configurable: true,
-          get: () => dt.files
-        });
+        Object.defineProperty(input, "files", { configurable: true, get: () => dt.files });
         assigned = true;
-        console.log("[DS-MARKER] defineProperty fallback used");
       } catch (e) {
         console.error("[DS-MARKER] cannot assign files:", e);
         return false;
       }
     }
-
-    const before = countAttachmentChips();
     input.dispatchEvent(new Event("input", { bubbles: true }));
     input.dispatchEvent(new Event("change", { bubbles: true }));
-    console.log("[DS-MARKER] change dispatched; chips before:", before);
-
-    const ok = await waitForAttachments(files.length, 30000);
-    if (!ok) {
-      await attachViaClipboard(files).catch(() => {});
-    }
-    return ok;
+    return await waitForAttachments(files.length, 30000);
   }
 
-  async function attachViaClipboard(files) {
-    const input = findChatInputSync();
-    if (!input) return false;
+  async function detachFiles() {
+    let removed = 0;
+    const before = countAttachmentChips();
+    const fileInput = document.querySelector('input[type="file"]');
+    if (fileInput) {
+      try {
+        const dt = new DataTransfer();
+        fileInput.files = dt.files;
+        fileInput.dispatchEvent(new Event("change", { bubbles: true }));
+      } catch (_) {}
+    }
+    const chipSelectors = ATTACHMENT_CHIP_SELECTORS.split(",");
+    for (const sel of chipSelectors) {
+      for (const chip of document.querySelectorAll(sel.trim())) {
+        const candidates = chip.querySelectorAll('button, [role="button"], [aria-label]');
+        for (const btn of candidates) {
+          const label = ((btn.getAttribute("aria-label") || "") + " " + (btn.getAttribute("title") || "") + " " + (btn.textContent || ""));
+          if (/close|remove|delete|clear|удал|✕|×|x/i.test(label)) {
+            try { clickWithMouse(btn); removed++; await sleep(80); } catch (_) {}
+            break;
+          }
+        }
+      }
+    }
+    await sleep(200);
+    return countAttachmentChips() < before || before === 0;
+  }
+
+  // ============================================================
+  //  Clipboard (Отправка файлов через буфер)
+  // ============================================================
+  function filesToClipboardText(files) {
+    const parts = [];
+    for (const f of files || []) {
+      const content = isProbablyTextMime(f.mime, f.name) ? base64ToText(f.dataBase64) : "";
+      parts.push(f.name + "\n" + content);
+    }
+    return parts.join("\n\n---\n\n");
+  }
+
+  async function clipboardCopy(files) {
+    if (!files || files.length === 0) return false;
+    const clip = filesToClipboardText(files);
+    if (!clip) return false;
+    try {
+      await navigator.clipboard.writeText(clip);
+      console.log("[DS-MARKER] clipboardCopy: ok, length =", clip.length);
+      return true;
+    } catch (e) {
+      console.warn("[DS-MARKER] clipboardCopy failed:", e);
+      return false;
+    }
+  }
+
+  async function clipboardPaste() {
+    const input = await findChatInput(10000);
+    if (!input) throw new Error("[DS] Поле ввода не найдено");
+    input.focus();
+    await sleep(100);
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) {
+        await appendText(text);
+        console.log("[DS-MARKER] clipboardPaste: via readText, len =", text.length);
+        return true;
+      }
+    } catch (e) {
+      console.warn("[DS-MARKER] clipboardPaste: readText failed:", e && e.message);
+    }
+    try {
+      if (document.execCommand("paste")) {
+        console.log("[DS-MARKER] clipboardPaste: via execCommand('paste')");
+        return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  // ============================================================
+  //  Симуляция Ctrl+V с полноценным событием paste
+  // ============================================================
+  function simulatePasteHotkey(input, text) {
+    if (!input) return;
     input.focus();
 
-    for (const f of files) {
-      let textContent = "";
-      try {
-        const bytes = base64ToBytes(f.dataBase64);
-        textContent = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-      } catch (_) {
-        continue;
-      }
-      const clip = f.name + "\n" + textContent;
+    const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+    const ctrlKey = !isMac;
+    const metaKey = isMac;
 
-      let wrote = false;
-      try {
-        await navigator.clipboard.writeText(clip);
-        wrote = true;
-      } catch (e) {
-        console.warn("[DS-MARKER] clipboard write failed:", e);
-      }
+    // 1. Эмуляция keydown
+    const keyDownEvent = new KeyboardEvent('keydown', {
+      key: 'v',
+      code: 'KeyV',
+      keyCode: 86,
+      which: 86,
+      ctrlKey: ctrlKey,
+      metaKey: metaKey,
+      bubbles: true,
+      cancelable: true
+    });
+    input.dispatchEvent(keyDownEvent);
 
-      if (!wrote) break;
+    // 2. Создаем объект DataTransfer и событие paste
+    if (text) {
+      const dt = new DataTransfer();
+      dt.setData('text/plain', text);
 
-      try {
-        document.execCommand("paste");
-      } catch (_) {
-        insertTextIntoInput(input, clip);
-      }
-      await sleep(300);
+      const pasteEvent = new ClipboardEvent('paste', {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: dt
+      });
+
+      // Отправляем событие paste в React
+      input.dispatchEvent(pasteEvent);
     }
+
+    // 3. Эмуляция keyup
+    const keyUpEvent = new KeyboardEvent('keyup', {
+      key: 'v',
+      code: 'KeyV',
+      keyCode: 86,
+      which: 86,
+      ctrlKey: ctrlKey,
+      metaKey: metaKey,
+      bubbles: true,
+      cancelable: true
+    });
+    input.dispatchEvent(keyUpEvent);
+
+    console.log("[DS-MARKER] simulatePasteHotkey: dispatched", isMac ? "Cmd+V" : "Ctrl+V", "+ paste event");
+  }
+
+  async function clipboardAttach(files) {
+    if (!files || files.length === 0) return true;
+    const input = await findChatInput(10000);
+    if (!input) throw new Error("[DS] Поле ввода не найдено");
+
+    const clip = filesToClipboardText(files);
+    if (!clip) return false;
+
+    let wrote = false;
+    try {
+      await navigator.clipboard.writeText(clip);
+      wrote = true;
+    } catch (e) {
+      console.warn("[DS-MARKER] clipboardAttach: write failed:", e && e.message);
+    }
+
+    if (wrote) {
+      input.focus();
+      await sleep(50);
+
+      // 1. Эмуляция Ctrl+V + вставка через событие paste
+      simulatePasteHotkey(input, clip);
+      await sleep(150);
+
+      // Проверяем, вставился ли текст
+      const currentText = readInputText(input);
+      if (currentText && currentText.trim().length > 0) {
+        console.log("[DS-MARKER] clipboardAttach: text inserted via simulated Ctrl+V");
+        return true;
+      }
+
+      // 2. Если Ctrl+V не сработал, пробуем execCommand('paste')
+      try {
+        if (document.execCommand("paste")) {
+          console.log("[DS-MARKER] clipboardAttach: via execCommand('paste')");
+          return true;
+        }
+      } catch (_) {}
+
+      // 3. Пробуем execCommand('insertText')
+      try {
+        if (document.execCommand("insertText", false, clip)) {
+          console.log("[DS-MARKER] clipboardAttach: via execCommand('insertText')");
+          return true;
+        }
+      } catch (_) {}
+    }
+
+    // 4. Гарантированный fallback (вставляет в конец, сохраняя текст)
+    input.focus();
+    await sleep(50);
+    const currentText = readInputText(input);
+    insertTextIntoInput(input, currentText + (currentText ? "\n" : "") + clip);
+    console.log("[DS-MARKER] clipboardAttach: via insertText fallback, len =", clip.length);
     return true;
   }
 
-  /**
-   * ===== ИЗМЕНЕНО: надёжная вставка текста в актуальный composer =====
-   * Повторно ищет элемент, ставит фокус, вставляет текст.
-   * Работает и с textarea/input, и с contenteditable.
-   */
+  // ============================================================
+  //  Вставка / дописывание текста
+  // ============================================================
   function insertTextIntoInput(input, text) {
-    if (!input) return false;
+    if (!input) return;
     input.focus();
 
     if (input.isContentEditable) {
-      // Очищаем и вставляем
       const range = document.createRange();
       range.selectNodeContents(input);
       range.collapse(false);
@@ -496,16 +618,13 @@
       sel.removeAllRanges();
       sel.addRange(range);
 
-      let ok = false;
-      try { ok = document.execCommand("insertText", false, text); } catch (_) {}
+      const ok = document.execCommand("insertText", false, text);
       if (!ok) {
-        // Fallback: прямое изменение textContent
         input.textContent = (input.textContent || "") + text;
         input.dispatchEvent(new InputEvent("input", {
           bubbles: true, data: text, inputType: "insertText"
         }));
       }
-      return true;
     } else if (input.tagName === "TEXTAREA" || input.tagName === "INPUT") {
       const proto = input.tagName === "TEXTAREA"
           ? HTMLTextAreaElement.prototype
@@ -514,27 +633,23 @@
       setter.call(input, text);
       input.dispatchEvent(new Event("input", { bubbles: true }));
       input.dispatchEvent(new Event("change", { bubbles: true }));
-      return true;
     }
-    return false;
   }
 
-  /**
-   * ===== НОВОЕ: отдельная функция setText =====
-   * Повторно находит composer (после attach DOM мог измениться),
-   * ставит фокус, вставляет текст.
-   * @returns {Promise<boolean>}
-   */
+  function readInputText(input) {
+    if (!input) return "";
+    if (input.isContentEditable) return input.textContent || "";
+    if (input.tagName === "TEXTAREA" || input.tagName === "INPUT") return input.value || "";
+    return "";
+  }
+
   async function setText(text) {
     if (!text) return true;
-
-    // Повторный поиск после возможной перерисовки DOM
     const input = await findChatInput(10000);
     if (!input) {
       console.error("[DS-MARKER] chat input not found");
       return false;
     }
-
     const rect = input.getBoundingClientRect();
     const mouseOpts = {
       bubbles: true, cancelable: true, view: window,
@@ -548,16 +663,20 @@
     input.focus();
 
     await sleep(50);
-    const ok = insertTextIntoInput(input, text);
+    insertTextIntoInput(input, text);
     await sleep(150);
-    return ok;
+    return true;
   }
 
-  /**
-   * ===== НОВОЕ: отдельная функция clickSend =====
-   * Находит кнопку отправки, ждёт её активации, кликает.
-   * @returns {Promise<boolean>}
-   */
+  async function appendText(text) {
+    if (!text) return true;
+    const input = await findChatInput(10000);
+    if (!input) return false;
+    const current = readInputText(input);
+    insertTextIntoInput(input, current + (current ? "\n" : "") + text);
+    return true;
+  }
+
   async function clickSend() {
     let sendBtn = null;
     const btnStart = Date.now();
@@ -567,15 +686,13 @@
         for (const icon of icons) {
           const path = icon.querySelector("svg path");
           if (path && /M8\.3125\s+0\.980206/.test(path.getAttribute("d") || "")) {
-            sendBtn = icon.closest(".ds-button") || icon.closest("button") ||
-                icon.parentElement || icon;
+            sendBtn = icon.closest(".ds-button") || icon.closest("button") || icon.parentElement || icon;
             break;
           }
         }
       }
       if (sendBtn) {
-        const disabled = sendBtn.disabled
-            || sendBtn.getAttribute("aria-disabled") === "true";
+        const disabled = sendBtn.disabled || sendBtn.getAttribute("aria-disabled") === "true";
         if (!disabled) break;
       }
       await sleep(100);
@@ -615,11 +732,9 @@
     for (const span of spans) {
       const text = (span.textContent || "").trim();
       if (!CONTINUE_TEXT.test(text)) continue;
-      const btn = span.closest('[role="button"]') || span.closest("button") ||
-          span.closest(".ds-button") || span.parentElement;
+      const btn = span.closest('[role="button"]') || span.closest("button") || span.closest(".ds-button") || span.parentElement;
       if (!btn) continue;
-      if (btn.disabled) continue;
-      if (btn.getAttribute("aria-disabled") === "true") continue;
+      if (btn.disabled || btn.getAttribute("aria-disabled") === "true") continue;
       const rect = btn.getBoundingClientRect();
       if (rect.width === 0 && rect.height === 0) continue;
       return btn;
@@ -679,7 +794,6 @@
     if (!btn) throw new Error("[DS] Кнопка 'Стоп' не найдена");
     stopRequested = true;
     clickWithMouse(btn);
-    console.log("[DS] ✔ Генерация остановлена");
     return true;
   }
 
@@ -707,53 +821,64 @@
   }
 
   // ============================================================
-  //  sendToDeepSeek — теперь разделён на 3 шага
+  //  sendToDeepSeek
   // ============================================================
-  async function sendToDeepSeek(text, files) {
+  async function sendToDeepSeek(text, files, opts = {}) {
     stopRequested = false;
 
-    // 1. Парсим маркеры из текста
     const { cleanText, files: markerFiles } = extractFileMarkers(text || "");
     const allFiles = [];
     if (Array.isArray(files)) allFiles.push(...files);
     if (markerFiles.length) allFiles.push(...markerFiles);
 
-    console.log(
-        "[DS-MARKER] send: cleanText=" + cleanText.length +
-        " chars, files=" + allFiles.length +
-        " (" + allFiles.map(f => f.name).join(", ") + ")"
-    );
+    const useClipboard = !!(opts && opts.clipboard);
+    const skipAttach   = !!(opts && opts.skipAttach);
+    const strict       = !!(opts && opts.strict);
 
-    // 2. ШАГ A: прикрепляем файлы (если есть)
-    if (allFiles.length > 0) {
-      const attached = await attachFiles(allFiles);
-      if (!attached) {
-        console.warn("[DS-MARKER] attachFiles returned false — продолжаем, но файлы могли не прикрепиться");
-      }
-    }
-
-    // 3. ШАГ B: вставляем текст (отдельная функция, повторный поиск composer)
+    // 1. Вставляем текст задания
     if (cleanText) {
-      const textOk = await setText(cleanText);
-      if (!textOk) {
-        throw new Error("[DS] Не удалось вставить текст в поле ввода");
-      }
-    } else if (allFiles.length === 0) {
-      throw new Error("[DS] no content to send");
+      // Если skipAttach == true, значит файлы УЖЕ вставлены через буфер,
+      // и нам нужно только дописать текст. Иначе — заменяем содержимое.
+      const textOk = skipAttach ? await appendText(cleanText) : await setText(cleanText);
+      if (!textOk) throw new Error("[DS] Не удалось вставить текст в поле ввода");
     }
 
-    // 4. ШАГ C: запускаем отправку (отдельная функция)
+    // 2. Вставляем файлы (через буфер обмена)
+    if (allFiles.length > 0 && !skipAttach) {
+      let attachOk = true;
+      if (useClipboard) {
+        attachOk = await clipboardAttach(allFiles);
+      } else {
+        attachOk = await attachFiles(allFiles);
+      }
+
+      if (!attachOk) {
+        await detachFiles().catch(() => {});
+        if (cleanText) await setText(cleanText);
+        if (strict) throw new Error("[DS] Файлы не прикрепились (" + allFiles.length + " шт) — отправка отменена");
+      }
+    }
+
+    // 3. Нажимаем кнопку отправки запроса
     const sent = await clickSend();
     if (!sent) {
+      await detachFiles().catch(() => {});
       throw new Error("[DS] Не удалось нажать кнопку отправки");
     }
+    return true;
+  }
 
-    console.log("[DS] ✔ Отправлено (cleanText:", cleanText.length, "chars, files:", allFiles.length, ")");
+  async function sendWithAttached(text) {
+    stopRequested = false;
+    const { cleanText } = extractFileMarkers(text || "");
+    if (cleanText) await appendText(cleanText);
+    const sent = await clickSend();
+    if (!sent) throw new Error("[DS] Не удалось нажать кнопку отправки");
     return true;
   }
 
   // ============================================================
-  //  newChat / thinking / smart-search
+  //  Оригинальный функционал (NEW CHAT, THINKING, SEARCH)
   // ============================================================
   async function newChat() {
     let plusBtn = null;
@@ -778,8 +903,7 @@
     while (Date.now() - chatStart < 3000) {
       const candidates = document.querySelectorAll('div[tabindex="0"], [role="button"]');
       for (const el of candidates) {
-        const spans = el.querySelectorAll("span");
-        for (const s of spans) {
+        for (const s of el.querySelectorAll("span")) {
           const t = (s.textContent || "").trim();
           if (t === "Новый чат" || t === "New chat" || /^New chat$/i.test(t)) {
             newChatBtn = el; break;
@@ -827,9 +951,7 @@
     if (toggle.getAttribute("aria-pressed") === "true") return true;
     clickWithMouse(toggle);
     await sleep(500);
-    if (toggle.getAttribute("aria-pressed") !== "true") {
-      throw new Error("[DS] Не удалось включить режим размышления");
-    }
+    if (toggle.getAttribute("aria-pressed") !== "true") throw new Error("[DS] Не удалось включить режим размышления");
     return true;
   }
 
@@ -839,25 +961,20 @@
     if (toggle.getAttribute("aria-pressed") !== "true") return true;
     clickWithMouse(toggle);
     await sleep(500);
-    if (toggle.getAttribute("aria-pressed") === "true") {
-      throw new Error("[DS] Не удалось выключить режим размышления");
-    }
+    if (toggle.getAttribute("aria-pressed") === "true") throw new Error("[DS] Не удалось выключить режим размышления");
     return true;
   }
 
   function findSmartSearchToggle() {
     for (const el of document.querySelectorAll("[aria-pressed]")) {
-      const spans = el.querySelectorAll("span");
-      for (const s of spans) {
-        const t = (s.textContent || "").trim();
-        if (/^(Search|Умный поиск)$/i.test(t)) return el;
+      for (const s of el.querySelectorAll("span")) {
+        if (/^(Search|Умный поиск)$/i.test((s.textContent || "").trim())) return el;
       }
       const title = el.getAttribute("title") || el.getAttribute("aria-label") || "";
       if (/^(Search|Умный поиск)$/i.test(title)) return el;
     }
     for (const el of document.querySelectorAll("[aria-pressed]")) {
-      let hasSearchHandle = false;
-      let isThinking = false;
+      let hasSearchHandle = false, isThinking = false;
       for (const p of el.querySelectorAll("svg path")) {
         const d = p.getAttribute("d") || "";
         if (d.includes("M1.6399999856948853,8 C1.6399999856948853,8 14.359999656677246,8 14.359999656677246,8")) hasSearchHandle = true;
@@ -884,9 +1001,7 @@
     if (toggle.getAttribute("aria-pressed") === "true") return true;
     clickWithMouse(toggle);
     await sleep(500);
-    if (toggle.getAttribute("aria-pressed") !== "true") {
-      throw new Error("[DS] Не удалось включить умный поиск");
-    }
+    if (toggle.getAttribute("aria-pressed") !== "true") throw new Error("[DS] Не удалось включить умный поиск");
     return true;
   }
 
@@ -896,61 +1011,76 @@
     if (toggle.getAttribute("aria-pressed") !== "true") return true;
     clickWithMouse(toggle);
     await sleep(500);
-    if (toggle.getAttribute("aria-pressed") === "true") {
-      throw new Error("[DS] Не удалось выключить умный поиск");
-    }
+    if (toggle.getAttribute("aria-pressed") === "true") throw new Error("[DS] Не удалось выключить умный поиск");
     return true;
   }
 
-  // ---------- публичный API ----------
-  window.sendToDeepSeek      = sendToDeepSeek;
-  window.newChat             = newChat;
-  window.enableThinking      = enableThinking;
-  window.disableThinking     = disableThinking;
-  window.enableSmartSearch   = enableSmartSearch;
-  window.disableSmartSearch  = disableSmartSearch;
-  window.stopGeneration      = stopGeneration;
-  window.resumeGeneration    = resumeGeneration;
+  // ---------- Экспорт API ----------
+  window.sendToDeepSeek = sendToDeepSeek;
+  window.sendWithAttached = sendWithAttached;
+  window.newChat = newChat;
+  window.enableThinking = enableThinking;
+  window.disableThinking = disableThinking;
+  window.enableSmartSearch = enableSmartSearch;
+  window.disableSmartSearch = disableSmartSearch;
+  window.stopGeneration = stopGeneration;
+  window.resumeGeneration = resumeGeneration;
 
-  // ===== НОВОЕ: публичные шаги для отладки/ручного вызова =====
-  window.dsAttachFiles       = attachFiles;
-  window.dsSetText           = setText;
-  window.dsClickSend         = clickSend;
+  window.dsAttachFiles = attachFiles;
+  window.dsDetachFiles = detachFiles;
+  window.dsSetText = setText;
+  window.dsAppendText = appendText;
+  window.dsClickSend = clickSend;
+  window.dsClipboardAttach = clipboardAttach;
+  window.dsClipboardCopy = clipboardCopy;
+  window.dsClipboardPaste = clipboardPaste;
 
   setupContinueWatcher();
 
-  // ---------- приём команд ----------
+  // ---------- Приём команд ----------
   window.addEventListener(EVT_EXEC, (evt) => {
     const data = evt.detail;
     try {
       if (!data || typeof data !== "object") {
-        emitResult(false, "unknown command shape: " + safeStringify(data));
+        emitResult(false, "unknown command shape");
         return;
       }
 
       switch (data.type) {
         case "send":
-          window.sendToDeepSeek(data.text, data.files)
+          window.sendToDeepSeek(data.text, data.files, { clipboard: !!data.clipboard, skipAttach: !!data.skipAttach, strict: !!data.strict })
               .then(() => emitResult(true, "sent"))
               .catch((e) => emitResult(false, "send failed: " + (e && e.message || e)));
           return;
+        case "sendWithAttached":
+          window.sendWithAttached(data.text || "")
+              .then(() => emitResult(true, "sent-with-attached"))
+              .catch((e) => emitResult(false, "sendWithAttached failed: " + (e && e.message || e)));
+          return;
         case "attach":
-          // ===== НОВОЕ: отдельная команда прикрепления файлов =====
           attachFiles(data.files || [])
               .then((ok) => emitResult(ok, ok ? "attached" : "attach failed"))
               .catch((e) => emitResult(false, "attach failed: " + (e && e.message || e)));
           return;
-        case "setText":
-          // ===== НОВОЕ: отдельная команда вставки текста =====
-          setText(data.text || "")
-              .then((ok) => emitResult(ok, ok ? "text set" : "setText failed"))
-              .catch((e) => emitResult(false, "setText failed: " + (e && e.message || e)));
+        case "detach":
+          detachFiles()
+              .then(() => emitResult(true, "detached"))
+              .catch((e) => emitResult(false, "detach failed: " + (e && e.message || e)));
           return;
-        case "clickSend":
-          // ===== НОВОЕ: отдельная команда отправки =====
-          clickSend()
-              .then((ok) => emitResult(ok, ok ? "sent" : "clickSend failed"))
-              .catch((e) => emitResult(false, "clickSend failed: " + (e && e.message || e)));
+        case "clipboardAttach":
+          clipboardAttach(data.files || [])
+              .then((ok) => emitResult(ok, ok ? "clipboard-attached" : "clipboard-attach failed"))
+              .catch((e) => emitResult(false, "clipboardAttach failed: " + (e && e.message || e)));
+          return;
+        case "clipboardCopy":
+          clipboardCopy(data.files || [])
+              .then((ok) => emitResult(ok, ok ? "clipboard-copied" : "clipboard-copy failed"))
+              .catch((e) => emitResult(false, "clipboardCopy failed: " + (e && e.message || e)));
+          return;
+        case "clipboardPaste":
+          clipboardPaste()
+              .then((ok) => emitResult(ok, ok ? "clipboard-pasted" : "clipboard-paste failed"))
+              .catch((e) => emitResult(false, "clipboardPaste failed: " + (e && e.message || e)));
           return;
         case "newChat":
           window.newChat()
@@ -958,46 +1088,29 @@
               .catch((e) => emitResult(false, "newChat failed: " + (e && e.message || e)));
           return;
         case "enableThinking":
-          window.enableThinking()
-              .then(() => emitResult(true, "Режим размышления включён"))
-              .catch((e) => emitResult(false, "enableThinking failed: " + (e && e.message || e)));
+          window.enableThinking().then(() => emitResult(true, "Режим размышления включён")).catch((e) => emitResult(false, "enableThinking failed: " + e.message));
           return;
         case "disableThinking":
-          window.disableThinking()
-              .then(() => emitResult(true, "Режим размышления выключен"))
-              .catch((e) => emitResult(false, "disableThinking failed: " + (e && e.message || e)));
+          window.disableThinking().then(() => emitResult(true, "Режим размышления выключен")).catch((e) => emitResult(false, "disableThinking failed: " + e.message));
           return;
         case "enableSmartSearch":
-          window.enableSmartSearch()
-              .then(() => emitResult(true, "Умный поиск включён"))
-              .catch((e) => emitResult(false, "enableSmartSearch failed: " + (e && e.message || e)));
+          window.enableSmartSearch().then(() => emitResult(true, "Умный поиск включён")).catch((e) => emitResult(false, "enableSmartSearch failed: " + e.message));
           return;
         case "disableSmartSearch":
-          window.disableSmartSearch()
-              .then(() => emitResult(true, "Умный поиск выключен"))
-              .catch((e) => emitResult(false, "disableSmartSearch failed: " + (e && e.message || e)));
+          window.disableSmartSearch().then(() => emitResult(true, "Умный поиск выключен")).catch((e) => emitResult(false, "disableSmartSearch failed: " + e.message));
           return;
         case "stopGeneration":
-          window.stopGeneration()
-              .then(() => emitResult(true, "Генерация остановлена"))
-              .catch((e) => emitResult(false, "stopGeneration failed: " + (e && e.message || e)));
+          window.stopGeneration().then(() => emitResult(true, "Генерация остановлена")).catch((e) => emitResult(false, "stopGeneration failed: " + e.message));
           return;
         case "resumeGeneration":
-          window.resumeGeneration()
-              .then(() => emitResult(true, "Генерация продолжена"))
-              .catch((e) => emitResult(false, "resumeGeneration failed: " + (e && e.message || e)));
-          return;
-        case "getState":
+          window.resumeGeneration().then(() => emitResult(true, "Генерация продолжена")).catch((e) => emitResult(false, "resumeGeneration failed: " + e.message));
           return;
         case "eval": {
           let result;
           try { result = (0, eval)(data.code); }
           catch (e) { emitResult(false, "eval error: " + (e && e.message || e)); return; }
           if (result && typeof result.then === "function") {
-            result.then(
-                (v) => emitResult(true, "→ " + safeStringify(v)),
-                (err) => emitResult(false, "async error: " + (err && err.message || err))
-            );
+            result.then((v) => emitResult(true, "→ " + safeStringify(v)), (err) => emitResult(false, "async error: " + (err && err.message || err)));
           } else {
             emitResult(true, "→ " + safeStringify(result));
           }
@@ -1021,7 +1134,5 @@
   try { window.dispatchEvent(new CustomEvent(EVT_READY)); } catch (_) {}
 
   console.info("[DS-INTERCEPT] fetch/XHR patched →", TARGET_PATH);
-  console.info("[DS-INTERCEPT] window.{sendToDeepSeek,newChat,enableThinking,disableThinking,enableSmartSearch,disableSmartSearch,stopGeneration,resumeGeneration} attached");
-  console.info("[DS-INTERCEPT] marker support: <!--DSFILE:BEGIN ... -->base64<!--DSFILE:END-->");
-  console.info("[DS-INTERCEPT] split mode: attachFiles / setText / clickSend");
+  console.info("[DS-INTERCEPT] split mode + clipboard mode active");
 })();

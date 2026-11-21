@@ -3,6 +3,7 @@ package ru.miacomsoft.ollama;
 import com.sun.net.httpserver.HttpExchange;
 import org.json.JSONArray;
 import org.json.JSONObject;
+import ru.miacomsoft.bridge.Attachment;
 import ru.miacomsoft.bridge.BridgeCommands;
 import ru.miacomsoft.bridge.StreamListener;
 import ru.miacomsoft.session.SessionManager;
@@ -114,6 +115,22 @@ public final class OllamaNativeApi {
 
         OllamaInputExtractor.UserInput ui = OllamaInputExtractor.extractUserInput(req);
 
+        // ← НОВОЕ: файлы, переданные веб-клиентом отдельным массивом "files"
+        JSONArray filesArr = req.optJSONArray("files");
+        if (filesArr != null) {
+            for (int i = 0; i < filesArr.length(); i++) {
+                JSONObject f = filesArr.optJSONObject(i);
+                if (f == null) continue;
+                String name = f.optString("name", "file.bin");
+                String mime = f.optString("mimeType",
+                        f.optString("mime", "application/octet-stream"));
+                String b64  = f.optString("dataBase64", "");
+                if (!b64.isEmpty()) {
+                    ui.attachments.add(new Attachment(name, mime, b64));
+                }
+            }
+        }
+
         if (!ui.hasContent()) {
             writeError(ex, 400, "no user content (text or images) in 'messages'");
             return;
@@ -121,12 +138,22 @@ public final class OllamaNativeApi {
 
         SessionManager.get().addMessage("user", ui.text);
 
-        boolean stream = req.optBoolean("stream", true);
-        if (stream) handleChatStream(ex, ui);
+        boolean stream       = req.optBoolean("stream", true);
+        boolean clipboard    = req.optBoolean("clipboard", false);
+        boolean skipAttach   = req.optBoolean("skipAttach", false);
+        boolean strict       = req.optBoolean("strict", false);
+        boolean setTextFirst = req.optBoolean("setTextFirst", true);
+
+        if (stream) handleChatStream(ex, ui, clipboard, skipAttach, strict, setTextFirst);
         else        handleChatNonStream(ex, ui);
     }
 
-    static void handleChatStream(HttpExchange ex, OllamaInputExtractor.UserInput ui) throws IOException {
+    static void handleChatStream(HttpExchange ex,
+                                 OllamaInputExtractor.UserInput ui,
+                                 boolean clipboard,
+                                 boolean skipAttach,
+                                 boolean strict,
+                                 boolean setTextFirst) throws IOException {
         ex.getResponseHeaders().set("Content-Type", "application/x-ndjson; charset=utf-8");
         ex.getResponseHeaders().set("Cache-Control", "no-cache");
         ex.sendResponseHeaders(200, 0);
@@ -138,7 +165,7 @@ public final class OllamaNativeApi {
                 JSONObject chunk = new JSONObject();
                 chunk.put("model", MODEL_NAME);
                 chunk.put("created_at", nowIso());
-                chunk.put("type", type); // Передаем тип (RESPONSE / THINK)
+                chunk.put("type", type); // RESPONSE / THINK
                 JSONObject msg = new JSONObject();
                 msg.put("role", "assistant");
                 msg.put("content", text);
@@ -149,18 +176,27 @@ public final class OllamaNativeApi {
                     os.flush();
                 } catch (Exception ignored) {}
             }
+
             @Override
             public void onDone() {
                 JSONObject done = doneObject("");
-                try { os.write((done.toString() + "\n").getBytes(StandardCharsets.UTF_8)); }
-                catch (Exception ignored) {}
+                try {
+                    os.write((done.toString() + "\n").getBytes(StandardCharsets.UTF_8));
+                } catch (Exception ignored) {}
                 try { os.close(); } catch (Exception ignored) {}
             }
+
             @Override
             public void onError(String message) {
+                try {
+                    JSONObject err = new JSONObject();
+                    err.put("error", message == null ? "error" : message);
+                    os.write((err.toString() + "\n").getBytes(StandardCharsets.UTF_8));
+                    os.flush();
+                } catch (Exception ignored) {}
                 try { os.close(); } catch (Exception ignored) {}
             }
-        });
+        }, clipboard, strict, skipAttach, setTextFirst);
     }
 
     static void handleChatNonStream(HttpExchange ex, OllamaInputExtractor.UserInput ui) {
@@ -331,98 +367,130 @@ public final class OllamaNativeApi {
     //  /api/pull
     // ------------------------------------------------------------
     public static void handlePull(HttpExchange ex) throws IOException {
-        setCors(ex);
-        logIncomingRequest(ex, null);
-        if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) { noContent(ex); return; }
-        if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) { methodNotAllowed(ex); return; }
-
-        ex.getResponseHeaders().set("Content-Type", "application/x-ndjson; charset=utf-8");
-        ex.sendResponseHeaders(200, 0);
-        OutputStream os = ex.getResponseBody();
-
-        try {
-            JSONObject start = new JSONObject();
-            start.put("status", "pulling manifest");
-            os.write((start.toString() + "\n").getBytes(StandardCharsets.UTF_8));
-            os.flush();
-
-            JSONObject ok = new JSONObject();
-            ok.put("status", "success");
-            os.write((ok.toString() + "\n").getBytes(StandardCharsets.UTF_8));
-            os.flush();
-        } catch (Exception ignored) {}
-
-        try { os.close(); } catch (Exception ignored) {}
+        handleModelOp(ex, "success", true);
     }
 
     // ------------------------------------------------------------
     //  /api/push
     // ------------------------------------------------------------
     public static void handlePush(HttpExchange ex) throws IOException {
-        setCors(ex);
-        logIncomingRequest(ex, null);
-        if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) { noContent(ex); return; }
-        if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) { methodNotAllowed(ex); return; }
-        JSONObject resp = new JSONObject();
-        resp.put("status", "success");
-        writeJson(ex, 200, resp);
+        handleModelOp(ex, "success", true);
     }
 
     // ------------------------------------------------------------
     //  /api/create
     // ------------------------------------------------------------
     public static void handleCreate(HttpExchange ex) throws IOException {
-        setCors(ex);
-        logIncomingRequest(ex, null);
-        if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) { noContent(ex); return; }
-        if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) { methodNotAllowed(ex); return; }
-
-        ex.getResponseHeaders().set("Content-Type", "application/x-ndjson; charset=utf-8");
-        ex.sendResponseHeaders(200, 0);
-        OutputStream os = ex.getResponseBody();
-        try {
-            JSONObject ok = new JSONObject();
-            ok.put("status", "success");
-            os.write((ok.toString() + "\n").getBytes(StandardCharsets.UTF_8));
-        } catch (Exception ignored) {}
-        try { os.close(); } catch (Exception ignored) {}
+        handleModelOp(ex, "success", true);
     }
 
     // ------------------------------------------------------------
-    //  /api/copy  /  /api/delete
+    //  /api/copy
     // ------------------------------------------------------------
     public static void handleCopy(HttpExchange ex) throws IOException {
         setCors(ex);
-        logIncomingRequest(ex, null);
         if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) { noContent(ex); return; }
-        writeError(ex, 404, "model copy not supported");
-    }
+        if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) { methodNotAllowed(ex); return; }
 
-    public static void handleDelete(HttpExchange ex) throws IOException {
-        setCors(ex);
-        logIncomingRequest(ex, null);
-        if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) { noContent(ex); return; }
+        String raw = readBody(ex);
+        JSONObject req;
+        try { req = new JSONObject(raw); }
+        catch (Exception e) { writeError(ex, 400, "invalid json"); return; }
+
+        String source = req.optString("source", "");
+        String dest   = req.optString("destination", "");
+        if (source.isEmpty() || dest.isEmpty()) {
+            writeError(ex, 400, "missing 'source' or 'destination'");
+            return;
+        }
+
         JSONObject resp = new JSONObject();
         resp.put("status", "success");
         writeJson(ex, 200, resp);
     }
 
     // ------------------------------------------------------------
-    //  Финальный кадр для /api/chat (non-stream и stream-onDone)
+    //  /api/delete
     // ------------------------------------------------------------
-    static JSONObject doneObject(String fullText) {
+    public static void handleDelete(HttpExchange ex) throws IOException {
+        setCors(ex);
+        if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) { noContent(ex); return; }
+        // Ollama принимает DELETE и (в некоторых версиях) POST
+        if (!"DELETE".equalsIgnoreCase(ex.getRequestMethod())
+                && !"POST".equalsIgnoreCase(ex.getRequestMethod())) {
+            methodNotAllowed(ex);
+            return;
+        }
+
+        String raw = readBody(ex);
+        JSONObject req;
+        try { req = new JSONObject(raw); }
+        catch (Exception e) { writeError(ex, 400, "invalid json"); return; }
+
+        String name = req.optString("name", "");
+        if (name.isEmpty()) {
+            writeError(ex, 400, "missing 'name'");
+            return;
+        }
+
         JSONObject resp = new JSONObject();
-        resp.put("model", MODEL_NAME);
-        resp.put("created_at", nowIso());
+        resp.put("status", "success");
+        writeJson(ex, 200, resp);
+    }
+
+    // ------------------------------------------------------------
+    //  helper: общий обработчик pull/push/create
+    //  Поддерживает stream (NDJSON, одна строка status:success)
+    //  и не-stream (обычный JSON).
+    // ------------------------------------------------------------
+    private static void handleModelOp(HttpExchange ex, String status, boolean allowEmptyBody)
+            throws IOException {
+        setCors(ex);
+        if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) { noContent(ex); return; }
+        if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) { methodNotAllowed(ex); return; }
+
+        String raw = readBody(ex);
+        JSONObject req;
+        try { req = raw.isEmpty() ? new JSONObject() : new JSONObject(raw); }
+        catch (Exception e) { writeError(ex, 400, "invalid json"); return; }
+
+        boolean stream = req.optBoolean("stream", true);
+
+        if (stream) {
+            ex.getResponseHeaders().set("Content-Type", "application/x-ndjson; charset=utf-8");
+            ex.getResponseHeaders().set("Cache-Control", "no-cache");
+            ex.sendResponseHeaders(200, 0);
+            OutputStream os = ex.getResponseBody();
+            JSONObject st = new JSONObject();
+            st.put("status", status);
+            try {
+                os.write((st.toString() + "\n").getBytes(StandardCharsets.UTF_8));
+                os.flush();
+                os.close();
+            } catch (Exception ignored) {}
+        } else {
+            JSONObject resp = new JSONObject();
+            resp.put("status", status);
+            writeJson(ex, 200, resp);
+        }
+    }
+
+    // ------------------------------------------------------------
+    //  helper: объект "done" для /api/chat
+    // ------------------------------------------------------------
+    static JSONObject doneObject(String content) {
+        JSONObject done = new JSONObject();
+        done.put("model", MODEL_NAME);
+        done.put("created_at", nowIso());
         JSONObject msg = new JSONObject();
         msg.put("role", "assistant");
-        msg.put("content", fullText == null ? "" : fullText);
-        resp.put("message", msg);
-        resp.put("done", true);
-        resp.put("done_reason", "stop");
-        resp.put("total_duration", 0);
-        resp.put("prompt_eval_count", 0);
-        resp.put("eval_count", 0);
-        return resp;
+        msg.put("content", content == null ? "" : content);
+        done.put("message", msg);
+        done.put("done", true);
+        done.put("done_reason", "stop");
+        done.put("total_duration", 0);
+        done.put("prompt_eval_count", 0);
+        done.put("eval_count", 0);
+        return done;
     }
 }
