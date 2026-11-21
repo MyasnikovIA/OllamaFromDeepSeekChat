@@ -1,0 +1,32 @@
+{
+    // HTTP-порт сервера (Ollama API + bridge)
+    "port": 11434,
+
+    // Таймаут watchdog: сколько ждём stream-done от браузера (мс)
+    "watchdogTimeoutMs": 120000,
+
+    // Максимальный размер одного вложения (байт)
+    "maxFileBytes": 20971520,
+
+    // Максимальный суммарный размер всех вложений (байт)
+    "maxTotalBytes": 52428800,
+
+    /* Ширина консоли для word-wrap.
+       Приоритет: -Dds.console.width > env COLUMNS > это значение. */
+    "consoleWidth": 120,
+
+    // Печатать входящие JSON-запросы (или задайте --debug)
+    "debug": false,
+
+    // Путь к папке Chrome-расширения (null = не загружать)
+    "extensionDir": null,
+
+    // Путь к профилю Chrome (null = по умолчанию)
+    "profileDir": null,
+
+    // URL, который открывает ChromeLauncher
+    "deepseekUrl": "https://chat.deepseek.com/",
+
+    // Имя модели в Ollama / OpenAI API
+    "modelName": "DeepSeekCloud"
+}

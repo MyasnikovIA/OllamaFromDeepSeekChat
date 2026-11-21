@@ -1,5 +1,7 @@
 package ru.miacomsoft;
 
+import ru.miacomsoft.config.Config;
+
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -7,8 +9,6 @@ import java.util.List;
 import java.util.Locale;
 
 public final class ChromeLauncher {
-
-    public static final String DEEPSEEK_URL = "https://chat.deepseek.com/";
 
     public enum OS { WINDOWS, MACOS, LINUX, UNKNOWN }
 
@@ -24,30 +24,30 @@ public final class ChromeLauncher {
     }
 
     public static void openDeepSeek() {
+        String url = Config.get().getDeepseekUrl();
         OS os = detectOS();
         System.out.println("[CHROME] OS detected: " + os);
 
         String chrome = findChromeExecutable(os);
         if (chrome == null) {
             System.out.println("[CHROME] Chrome not found, opening default browser");
-            openDefaultBrowser(os, DEEPSEEK_URL);
+            openDefaultBrowser(os, url);
             return;
         }
 
         System.out.println("[CHROME] binary: " + chrome);
         try {
-            launchChrome(chrome, DEEPSEEK_URL);
+            launchChrome(chrome, url);
         } catch (IOException e) {
             System.err.println("[CHROME] launch failed: " + e.getMessage());
-            openDefaultBrowser(os, DEEPSEEK_URL);
+            openDefaultBrowser(os, url);
         }
     }
 
-    // ============================================================
-    //  открыть Chrome с произвольным URL (fallback для /opentab)
-    // ============================================================
     public static void launchNewWindow(String url) {
-        String target = (url == null || url.trim().isEmpty()) ? DEEPSEEK_URL : url.trim();
+        String target = (url == null || url.trim().isEmpty())
+                ? Config.get().getDeepseekUrl()
+                : url.trim();
         OS os = detectOS();
         String chrome = findChromeExecutable(os);
         if (chrome == null) {
@@ -117,24 +117,23 @@ public final class ChromeLauncher {
     static void launchChrome(String chrome, String url) throws IOException {
         List<String> cmd = new ArrayList<>();
         cmd.add(chrome);
-        // ============================================================
-        //  ИЗМЕНЕНО: убран --new-window.
-        //  На первом запуске со свежим --user-data-dir Chrome
-        //  открывал ДВА окна: одно с дефолтной страницей, второе
-        //  с указанным URL. Одно окно с целевым URL — то, что нужно.
-        // ============================================================
         cmd.add("--no-first-run");
         cmd.add("--no-default-browser-check");
 
-        String extDir    = System.getProperty("ds.extension.dir");
+        // CLI (--extension/--profile) имеет приоритет над config.json.
+        String extDir = System.getProperty("ds.extension.dir");
+        if (extDir == null) extDir = Config.get().getExtensionDir();
+
         String profileDir = System.getProperty("ds.profile.dir");
+        if (profileDir == null) profileDir = Config.get().getProfileDir();
 
         if (extDir != null && !extDir.isEmpty()) {
             File f = new File(extDir);
             if (f.isDirectory()) {
                 cmd.add("--load-extension=" + f.getAbsolutePath());
                 if (profileDir == null || profileDir.isEmpty()) {
-                    profileDir = new File(System.getProperty("user.home"), ".deepseek-ollama-profile").getAbsolutePath();
+                    profileDir = new File(System.getProperty("user.home"),
+                            ".deepseek-ollama-profile").getAbsolutePath();
                 }
                 System.out.println("[CHROME] extension: " + f.getAbsolutePath());
             } else {

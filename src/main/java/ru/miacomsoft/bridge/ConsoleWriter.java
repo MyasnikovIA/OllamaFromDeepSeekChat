@@ -1,20 +1,18 @@
 package ru.miacomsoft.bridge;
 
+import ru.miacomsoft.config.Config;
+
 /**
  * Потоковый вывод текста в System.out с двумя возможностями:
  *
  *   1. Word-wrap по ширине терминала (по границам целых слов).
  *      Ширина берётся из:
  *        -Dds.console.width=<N>   (System property)
- *        env COLUMNS=<N>           (переменная окружения, обычно ставит shell)
+ *        env COLUMNS=<N>           (переменная окружения)
+ *        config.consoleWidth       (из config.json)
  *        fallback 120
  *
- *   2. Код между обратными кавычками (`x` или ```...```) выводится как есть:
- *      без word-wrap, с сохранением всех \n, символов и отступов.
- *
- * Все "прямые" сообщения ([TAB], [BYE], [TABOP], [EXT-ERR], [FILE] …)
- * должны предваряться вызовом ensureNewline() — иначе они "прилипнут"
- * к недописанному слову потока.
+ *   2. Код между обратными кавычками (`x` или ```...```) выводится как есть.
  */
 public final class ConsoleWriter {
 
@@ -22,7 +20,7 @@ public final class ConsoleWriter {
 
     public static ConsoleWriter get() { return INSTANCE; }
 
-    private final int width;
+    private int width;
     private int column = 0;
     private boolean inCode = false;
     private int fenceLen = 0;
@@ -41,16 +39,24 @@ public final class ConsoleWriter {
         if (env != null) {
             try { return Math.max(40, Integer.parseInt(env.trim())); } catch (Exception ignored) {}
         }
-        return 120;
+        try {
+            return Math.max(40, Config.get().getConsoleWidth());
+        } catch (Exception ignored) {
+            return 120;
+        }
     }
 
     public int getWidth() { return width; }
+
+    /** Пересчитать ширину из актуального конфига (после Config.load). */
+    public synchronized void reconfigure() {
+        this.width = detectWidth();
+    }
 
     // ------------------------------------------------------------
     //  Потоковый вывод
     // ------------------------------------------------------------
 
-    /** Печатает префикс [THINK] / [DEEPSEEK] в начало новой строки. */
     public synchronized void printTag(String tag) {
         flushWord();
         if (column > 0) {
@@ -62,7 +68,6 @@ public final class ConsoleWriter {
         System.out.flush();
     }
 
-    /** Печатает потоковый текст с word-wrap и сохранением кода. */
     public synchronized void appendStreamText(String text) {
         if (text == null || text.isEmpty()) return;
 
@@ -100,7 +105,6 @@ public final class ConsoleWriter {
                         column += spaces;
                     }
                 } else {
-                    // обычный пробел
                     if (column > 0 && column + 1 > width) {
                         System.out.println();
                         column = 0;
@@ -147,11 +151,6 @@ public final class ConsoleWriter {
         word.setLength(0);
     }
 
-    // ------------------------------------------------------------
-    //  Завершение / пауза потока
-    // ------------------------------------------------------------
-
-    /** Flush + перевод строки. Сбрасывает inCode. Для конца стрима. */
     public synchronized void finishStream() {
         flushWord();
         System.out.println();
@@ -161,7 +160,6 @@ public final class ConsoleWriter {
         System.out.flush();
     }
 
-    /** Flush + перевод строки (только если что-то недописано). */
     public synchronized void ensureNewline() {
         flushWord();
         if (column > 0) {
@@ -171,7 +169,6 @@ public final class ConsoleWriter {
         System.out.flush();
     }
 
-    /** Полный сброс состояния (для тестов). */
     public synchronized void reset() {
         word.setLength(0);
         column = 0;

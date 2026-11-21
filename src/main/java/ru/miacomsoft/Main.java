@@ -2,11 +2,16 @@ package ru.miacomsoft;
 
 import com.sun.net.httpserver.HttpServer;
 import ru.miacomsoft.bridge.BridgeCommands;
+import ru.miacomsoft.bridge.BridgeConstants;
 import ru.miacomsoft.bridge.BridgeRouter;
+import ru.miacomsoft.bridge.ConsoleWriter;
+import ru.miacomsoft.config.Config;
+import ru.miacomsoft.ollama.OllamaConstants;
 import ru.miacomsoft.ollama.OllamaRouter;
 import ru.miacomsoft.session.SessionManager;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.InputStreamReader;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -22,34 +27,20 @@ import java.util.concurrent.TimeUnit;
  *   --debug                   включить отладочный вывод JSON
  *   --extension=<путь>        путь к папке расширения Chrome
  *   --profile=<путь>          путь к профилю Chrome
- *
- * stdin:
- *   обычная строка    → sendToDeepSeek(text)
- *   "!js..."          → eval в консоли страницы
- *   "/new"            → создать новый чат
- *   "/think on"       → включить режим размышления
- *   "/think off"      → выключить режим размышления
- *   "/search on"      → включить умный поиск
- *   "/search off"     → выключить умный поиск
- *   "/stop"           → остановить текущую генерацию
- *   "/resume"         → продолжить остановленную генерацию
- *   "/file <path> [text]"  → отправить файл (можно с текстом)
- *   "/tabs"           → список открытых вкладок DeepSeek
- *   "/tab <n|id>"     → выбрать вкладку по номеру или tabId (можно префикс)
- *   "/opentab [url]"  → открыть новую вкладку DeepSeek
- *   "/newtab [url]"   → алиас для /opentab
- *   "/close <n|id>"   → закрыть вкладку по номеру или tabId (можно префикс)
- *   "/closeall"       → закрыть все вкладки chat.deepseek.com/*
- *   "/state"          → показать режимы активной вкладки
- *   "/help"           → подсказка
+ *   --config=<путь>           путь к config.json (по умолчанию — ./config.json)
+ *   --config <путь>           то же самое, но путь отдельным аргументом
  */
 public class Main {
 
-    public static final int PORT = 11434;
+    public static int    PORT       = Config.DEFAULT_PORT;
+    public static File   CONFIG_FILE = new File("config.json");
 
     public static void main(String[] args) throws Exception {
         boolean noBrowser = false;
-        for (String arg : args) {
+        String  configPath = null;
+
+        for (int i = 0; i < args.length; i++) {
+            String arg = args[i];
             if ("--no-browser".equals(arg)) {
                 noBrowser = true;
             } else if ("--debug".equals(arg)) {
@@ -58,8 +49,34 @@ public class Main {
                 System.setProperty("ds.extension.dir", arg.substring("--extension=".length()));
             } else if (arg.startsWith("--profile=")) {
                 System.setProperty("ds.profile.dir", arg.substring("--profile=".length()));
+            } else if (arg.startsWith("--config=")) {
+                configPath = arg.substring("--config=".length());
+            } else if ("--config".equals(arg) && i + 1 < args.length) {
+                configPath = args[++i];
             }
         }
+
+        CONFIG_FILE = (configPath == null || configPath.isEmpty())
+                ? new File("config.json")
+                : new File(configPath);
+
+        try {
+            Config.load(CONFIG_FILE);
+        } catch (org.json.JSONException e) {
+            // printJsonError уже отработал внутри Config.load
+            System.err.println("[CONFIG] JSON parse failed. Exiting.");
+            System.exit(1);
+            return;
+        } catch (java.io.IOException e) {
+            System.err.println("[CONFIG] read failed: " + e.getMessage() + " — using defaults.");
+        }
+
+        // Применить значения из конфига к статическим полям и ConsoleWriter.
+        BridgeConstants.applyFromConfig();
+        OllamaConstants.applyFromConfig();
+        ConsoleWriter.get().reconfigure();
+
+        PORT = Config.get().getPort();
 
         HttpServer server = HttpServer.create(new InetSocketAddress(PORT), 0);
         server.setExecutor(Executors.newCachedThreadPool());
@@ -101,12 +118,13 @@ public class Main {
     static void printBanner() {
         System.out.println("========================================================");
         System.out.println("[SERVER] listening on port " + PORT);
+        System.out.println("[SERVER] config file : " + CONFIG_FILE.getAbsolutePath());
         System.out.println("[SERVER] Ollama API : http://localhost:" + PORT + "/api/tags");
         System.out.println("[SERVER] Bridge SSE : http://localhost:" + PORT + "/events?tabId=...");
         System.out.println("[SERVER] Bridge log : http://localhost:" + PORT + "/log");
         System.out.println("[SERVER] Tabs list  : http://localhost:" + PORT + "/tabs");
         System.out.println("[SERVER] debug JSON : "
-                + (Boolean.parseBoolean(System.getProperty("ds.debug", "false")) ? "ON" : "off"));
+                + (OllamaConstants.DEBUG ? "ON" : "off"));
         System.out.println();
         System.out.println("  <текст>              → sendToDeepSeek(text)");
         System.out.println("  ! <js>               → eval в консоли страницы");
@@ -165,7 +183,6 @@ public class Main {
             return;
         }
 
-        // ---------- НОВОЕ: стоп / продолжить ----------
         if (trimmed.equals("/stop")) {
             BridgeCommands.sendStopFromStdin();
             return;
