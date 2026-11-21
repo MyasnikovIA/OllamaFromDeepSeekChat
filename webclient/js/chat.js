@@ -10,16 +10,63 @@
       this.history = [];
     }
 
-    async send(text) {
-      if (!text || this.busy) return;
+    // Чтение файлов через FileReader и формирование структуры для отправки
+    async _readFiles(files) {
+      const attachments = [];
+      for (const file of files) {
+        const text = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = reject;
+          reader.readAsText(file);
+        });
+        attachments.push({
+          name: file.name,
+          path: file.webkitRelativePath || file.name,
+          content: text,
+        });
+      }
+      return attachments;
+    }
+
+    // Формирование текста сообщения с блоками кода из файлов
+    _formatFilesForRequest(attachments) {
+      if (!attachments || attachments.length === 0) return "";
+      let result = "";
+      attachments.forEach(att => {
+        // Экранируем тройные бэктики внутри содержимого
+        const safeContent = att.content.replace(/```/g, "\\`\\`\\`");
+        result += `\`\`\`${att.path}\n${safeContent}\n\`\`\`\n\n`;
+      });
+      return result.trim();
+    }
+
+    async send(text, files = []) {
+      if ((!text && files.length === 0) || this.busy) return;
       this.busy = true;
 
       if (this.els.emptyState) {
         this.els.emptyState.classList.add("hidden");
       }
 
-      this.history.push({ role: "user", content: text });
-      UI.appendMessage(this.els.messages, text, "outgoing", UI.nowTime());
+      let attachments = [];
+      if (files && files.length > 0) {
+        attachments = await this._readFiles(files);
+      }
+
+      // Формируем полный текст для отправки (с файлами)
+      const fileBlock = this._formatFilesForRequest(attachments);
+      const fullText = fileBlock ? `${text}\n\n${fileBlock}`.trim() : text;
+
+      // Добавляем в историю
+      this.history.push({ role: "user", content: fullText });
+      UI.appendMessage(
+        this.els.messages,
+        text, // Отображаем только текст (без файлов) в истории
+        "outgoing",
+        UI.nowTime(),
+        attachments // Плашки файлов
+      );
 
       const typing = UI.appendMessage(this.els.messages, "", "incoming", UI.nowTime());
       typing.textContent = "";
@@ -56,7 +103,6 @@
         if (!accResponse) UI.updateTypingText(typing, "(пустой ответ)");
         this.history.push({ role: "assistant", content: accResponse });
         this._finish();
-        // Инициализация кнопок копирования кода после завершения стрима
         UI.initCopyButtons(typing);
         if (thoughtEl) UI.initCopyButtons(thoughtEl);
       });

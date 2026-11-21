@@ -81,6 +81,11 @@
 
         <footer class="composer">
             <button id="stop-btn" class="btn-stop hidden" title="Остановить">■</button>
+
+            <!-- Кнопка прикрепления файлов -->
+            <button id="attach-btn" class="btn-attach" title="Прикрепить файл">📎</button>
+            <input type="file" id="file-input" multiple style="display: none;">
+
             <textarea id="composer-input" rows="1" placeholder="Сообщение для DeepSeek… (Enter — отправить, Shift+Enter — перенос)"></textarea>
             <button id="send-btn" class="btn-send" title="Отправить">➤</button>
         </footer>

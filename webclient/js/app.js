@@ -39,7 +39,8 @@
     chat: null,
     pollTimer: null,
     tabContainers: {},
-    tabControllers: {}
+    tabControllers: {},
+    pendingFiles: [], // файлы, ожидающие отправки
   };
 
   function initConnectScreen() {
@@ -182,26 +183,17 @@
     UI.renderTabs(els.tabsList, state.tabs, state.activeTabId, selectAndRefresh, async (tabId) => {
       try {
         await state.api.cmd("closeTab", { tabId });
-
-        // Мгновенно убираем UI-элементы
         UI.removeTabUI(tabId, state.tabContainers);
         delete state.tabControllers[tabId];
-
-        // Если закрыли активную вкладку — сбрасываем активную
         if (state.activeTabId === tabId) {
           state.activeTabId = null;
           els.chatTitle.textContent = "Чат";
           els.chatSubtitle.textContent = "нет активной вкладки";
           els.messagesContainer.innerHTML = "";
         }
-
-        // Удаляем из локального массива
         state.tabs = state.tabs.filter(t => t.tabId !== tabId);
-        renderTabs(); // Перерисовываем без удаленной
-
-        // Синхронизация с сервером
+        renderTabs();
         setTimeout(() => refreshAll().catch(() => {}), 1000);
-
       } catch (e) {
         alert("Ошибка закрытия вкладки: " + e.message);
         refreshAll().catch(() => {});
@@ -317,18 +309,43 @@
       if (!state.chat) return;
       await state.chat.resume();
     });
+
+    // Прикрепление файлов
+    const attachBtn = document.getElementById("attach-btn");
+    const fileInput = document.getElementById("file-input");
+
+    if (attachBtn && fileInput) {
+      attachBtn.addEventListener("click", () => fileInput.click());
+
+      fileInput.addEventListener("change", () => {
+        state.pendingFiles = Array.from(fileInput.files);
+        fileInput.value = "";
+        if (state.pendingFiles.length > 0) {
+          els.composer.placeholder = `Прикреплено ${state.pendingFiles.length} файл(ов). Введите текст…`;
+        } else {
+          els.composer.placeholder = "Сообщение для DeepSeek… (Enter — отправить, Shift+Enter — перенос)";
+        }
+      });
+    }
   }
 
   async function sendCurrent() {
     const text = els.composer.value.trim();
-    if (!text || !state.chat) return;
+    if ((!text && state.pendingFiles.length === 0) || !state.chat) return;
     if (!state.activeTabId) {
       alert("Нет активной вкладки DeepSeek");
       return;
     }
+
+    const filesToSend = state.pendingFiles.slice();
+    state.pendingFiles = [];
+    const fileInput = document.getElementById("file-input");
+    if (fileInput) fileInput.value = "";
     els.composer.value = "";
     els.composer.style.height = "auto";
-    await state.chat.send(text);
+    els.composer.placeholder = "Сообщение для DeepSeek… (Enter — отправить, Shift+Enter — перенос)";
+
+    await state.chat.send(text, filesToSend);
   }
 
   function bindModes() {

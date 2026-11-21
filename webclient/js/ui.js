@@ -8,7 +8,81 @@
     show(el) { if (el) el.classList.remove("hidden"); },
     hide(el) { if (el) el.classList.add("hidden"); },
 
-    appendMessage(container, text, kind, meta) {
+    esc(s) {
+      return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    },
+
+    // Основной метод парсинга Markdown
+    parseMarkdown(text) {
+      if (!text) return "";
+
+      let html = this.esc(text);
+
+      // 1. Блоки кода (```...```)
+      const codeBlocks = [];
+      html = html.replace(/```([\w-]*)\n([\s\S]*?)```/g, (match, lang, code) => {
+        const id = "code-" + codeBlocks.length;
+        codeBlocks.push({ id, lang, code });
+        return `\u0000CODE_BLOCK_${codeBlocks.length - 1}\u0000`;
+      });
+
+      // 2. Заголовки
+      html = html.replace(/^###### (.*$)/gim, '<h6>$1</h6>');
+      html = html.replace(/^##### (.*$)/gim, '<h5>$1</h5>');
+      html = html.replace(/^#### (.*$)/gim, '<h4>$1</h4>');
+      html = html.replace(/^### (.*$)/gim, '<h3>$1</h3>');
+      html = html.replace(/^## (.*$)/gim, '<h2>$1</h2>');
+      html = html.replace(/^# (.*$)/gim, '<h1>$1</h1>');
+
+      // 3. Жирный и курсив
+      html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+      html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+      html = html.replace(/_([^_]+)_/g, '<em>$1</em>');
+
+      // 4. Инлайн-код (`...`)
+      html = html.replace(/`([^`\n]+)`/g, '<span class="msg-inline-code">$1</span>');
+
+      // 5. Списки (- или *)
+      html = html.replace(/^\s*[-*]\s+(.*$)/gim, '<li>$1</li>');
+      html = html.replace(/(<li>.*<\/li>)/gis, '<ul>$1</ul>');
+
+      // 6. Горизонтальная линия
+      html = html.replace(/^---$/gim, '<hr>');
+
+      // 7. Абзацы (оборачиваем оставшийся текст)
+      // Примечание: это упрощенная логика, чтобы не ломать уже созданные теги
+      const lines = html.split('\n');
+      let inParagraph = false;
+      const result = [];
+
+      for (let line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          if (inParagraph) { result.push('</p>'); inParagraph = false; }
+        } else if (trimmed.startsWith('<h') || trimmed.startsWith('<ul>') ||
+                   trimmed.startsWith('<li>') || trimmed.startsWith('<hr>') ||
+                   trimmed.startsWith('\u0000CODE_BLOCK_') || trimmed === '</ul>') {
+          if (inParagraph) { result.push('</p>'); inParagraph = false; }
+          result.push(line);
+        } else {
+          if (!inParagraph) { result.push('<p>'); inParagraph = true; }
+          result.push(line);
+        }
+      }
+      if (inParagraph) result.push('</p>');
+      html = result.join('\n');
+
+      // 8. Восстанавливаем блоки кода
+      html = html.replace(/\u0000CODE_BLOCK_(\d+)\u0000/g, (_, i) => {
+        const block = codeBlocks[Number(i)];
+        const escapedCode = this.esc(block.code);
+        return `<div class="code-container"><button class="copy-code-btn" data-code="${encodeURIComponent(block.code)}">📋</button><pre class="msg-code">${escapedCode}</pre></div>`;
+      });
+
+      return html;
+    },
+
+    appendMessage(container, text, kind, meta, attachments) {
       const row = document.createElement("div");
       row.className = "message-row " + kind;
 
@@ -16,9 +90,36 @@
       el.className = "message " + kind;
       if (kind === "thought") el.classList.add("thought");
 
-      el.innerHTML = this.formatMessageText(text);
+      // Вложения (файлы)
+      if (attachments && attachments.length > 0) {
+        const attDiv = document.createElement("div");
+        attDiv.className = "attached-files";
+        attachments.forEach(att => {
+          const btn = document.createElement("div");
+          btn.className = "file-attachment";
+          btn.innerHTML = `<span class="file-icon">📄</span><span class="file-name">${this.esc(att.name)}</span><span class="file-expand-hint">▶</span>`;
+          btn.onclick = (e) => {
+            e.stopPropagation();
+            btn.classList.toggle("expanded");
+            const hint = btn.querySelector(".file-expand-hint");
+            if (hint) hint.textContent = btn.classList.contains("expanded") ? "▼" : "▶";
+          };
+          attDiv.appendChild(btn);
 
-      // Кнопка копирования всего сообщения / размышления
+          const content = document.createElement("div");
+          content.className = "file-content";
+          content.textContent = att.content;
+          attDiv.appendChild(content);
+        });
+        el.appendChild(attDiv);
+      }
+
+      // Текст сообщения (через Markdown-парсер)
+      const textDiv = document.createElement("div");
+      textDiv.innerHTML = this.parseMarkdown(text);
+      el.appendChild(textDiv);
+
+      // Кнопка копирования
       const copyBtn = document.createElement("button");
       copyBtn.className = "copy-btn";
       copyBtn.innerHTML = "📋";
@@ -41,48 +142,22 @@
       row.appendChild(el);
       container.appendChild(row);
       container.scrollTop = container.scrollHeight;
+
+      // Инициализируем кнопки копирования кода
+      this.initCopyButtons(el);
+
       return el;
     },
 
-    formatMessageText(text) {
-      const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-
-      // 1. Извлекаем блоки ```...```, сохраняем их в массив и заменяем на плейсхолдеры
-      const codeBlocks = [];
-      let s = String(text).replace(/```(?:[a-zA-Z0-9_-]*\n)?([\s\S]*?)```/g, (match, code) => {
-        const id = "code-" + codeBlocks.length;
-        codeBlocks.push({ id, code });
-        return `\u0000CODE_BLOCK_${codeBlocks.length - 1}\u0000`;
-      });
-
-      // 2. Экранируем HTML в оставшемся тексте
-      s = esc(s);
-
-      // 3. Инлайн-код (одинарные бэктики)
-      s = s.replace(/`([^`\n]+)`/g, (_, c) => '<span class="msg-inline-code">' + c + "</span>");
-
-      // 4. Возвращаем блоки кода с оберткой, содержащей кнопку копирования
-      s = s.replace(/\u0000CODE_BLOCK_(\d+)\u0000/g, (_, i) => {
-        const block = codeBlocks[Number(i)];
-        const escapedCode = esc(block.code);
-        // Кнопка копирования кода
-        const copyBtn = `<button class="copy-code-btn" data-code="${encodeURIComponent(block.code)}">📋</button>`;
-        return `<div class="code-container">${copyBtn}<pre class="msg-code">${escapedCode}</pre></div>`;
-      });
-
-      return s;
-    },
-
-    // Обработчик для динамически созданных кнопок копирования кода
     initCopyButtons(root) {
       root.querySelectorAll('.copy-code-btn').forEach(btn => {
         btn.onclick = (e) => {
           e.stopPropagation();
           const code = decodeURIComponent(btn.getAttribute('data-code') || '');
           navigator.clipboard.writeText(code);
-          const originalHtml = btn.innerHTML;
+          const orig = btn.innerHTML;
           btn.innerHTML = "✅";
-          setTimeout(() => btn.innerHTML = originalHtml, 1500);
+          setTimeout(() => btn.innerHTML = orig, 1500);
         };
       });
     },
@@ -96,10 +171,19 @@
       if (!el) return;
       const meta = el.querySelector(".msg-meta");
       const copy = el.querySelector(".copy-btn");
-      el.innerHTML = this.formatMessageText(text);
+      const att = el.querySelector(".attached-files");
+      const textDiv = el.querySelector("div:not(.attached-files)");
+
+      const newHtml = this.parseMarkdown(text);
+      if (textDiv) {
+        textDiv.innerHTML = newHtml;
+      } else {
+        el.innerHTML = newHtml;
+      }
+
+      if (att) el.insertBefore(att, el.firstChild);
       if (meta) el.appendChild(meta);
       if (copy) el.appendChild(copy);
-      // Инициализируем кнопки копирования кода
       this.initCopyButtons(el);
     },
 
