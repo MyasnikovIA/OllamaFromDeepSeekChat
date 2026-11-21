@@ -29,7 +29,7 @@
       }
     }
 
-    async cmd(type, extra = {}, opts = {}) {
+    async cmd(type, extra = {}) {
       const data = await this._json("POST", "/api/command", { type, ...extra });
       if (!data.ok) throw new Error(data.error || "unknown error");
       return data.result;
@@ -50,15 +50,6 @@
       return this.cmd("tab", { tabId });
     }
 
-    async browsers() {
-      const result = await this.cmd("browsers");
-      return Array.isArray(result.browsers) ? result.browsers : [];
-    }
-
-    async openBrowser(index) {
-      return this.cmd("openBrowser", { index });
-    }
-
     async state() {
       return this.cmd("state");
     }
@@ -74,6 +65,16 @@
     async stop()      { return this.cmd("stopGeneration"); }
     async resume()    { return this.cmd("resumeGeneration"); }
 
+    async browsers() {
+      const result = await this.cmd("browsers");
+      return Array.isArray(result.browsers) ? result.browsers : [];
+    }
+
+    async openBrowser(index) {
+      return this.cmd("openBrowser", { index });
+    }
+
+    // ---------- потоковый чат ----------
     chatStream(messages, { signal } = {}) {
       const url = this.baseUrl + "/api/chat";
       const body = {
@@ -85,7 +86,9 @@
       const listeners = { chunk: [], done: [], error: [] };
       let aborted = false;
       const ctrl = new AbortController();
-      if (signal) signal.addEventListener("abort", () => { aborted = true; ctrl.abort(); }, { once: true });
+      if (signal) {
+        signal.addEventListener("abort", () => { aborted = true; ctrl.abort(); }, { once: true });
+      }
 
       const promise = (async () => {
         let resp;
@@ -131,7 +134,6 @@
               }
 
               if (chunk.message && chunk.message.content) {
-                // Передаем ТИП в коллбэк (RESPONSE или THINK)
                 listeners.chunk.forEach(fn => fn(chunk.message.content, chunk.type || "RESPONSE"));
               }
 
@@ -152,7 +154,7 @@
         abort() { aborted = true; ctrl.abort(); },
         onChunk(fn) { listeners.chunk.push(fn); return this; },
         onDone(fn)  { listeners.done.push(fn);  return this; },
-        onError(fn) { listeners.error.push(fn); return this; }
+        onError(fn) { listeners.error.push(fn); return this; },
       };
     }
   }

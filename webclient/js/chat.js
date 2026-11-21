@@ -1,6 +1,10 @@
 (function () {
   "use strict";
 
+  // Ограничение на inline-передачу base64 в тексте.
+  // Всё, что больше, шлём через /api/command {type:"file"}.
+  const MAX_INLINE_BYTES = 2 * 1024 * 1024; // 2 MB
+
   class ChatController {
     constructor(api, els) {
       this.api = api;
@@ -10,37 +14,60 @@
       this.history = [];
     }
 
-    // Чтение файлов через FileReader и формирование структуры для отправки
+    // ---------- чтение файлов ----------
     async _readFiles(files) {
-      const attachments = [];
-      for (const file of files) {
-        const text = await new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result);
-          reader.onerror = reject;
-          reader.readAsText(file);
+      const out = [];
+      for (const f of files) {
+        const b64 = await new Promise((resolve, reject) => {
+          const r = new FileReader();
+          r.onload = () => {
+            const result = String(r.result || "");
+            const comma = result.indexOf(",");
+            resolve(comma >= 0 ? result.slice(comma + 1) : result);
+          };
+          r.onerror = () => reject(r.error || new Error("read error"));
+          r.readAsDataURL(f);
         });
-        attachments.push({
-          name: file.name,
-          path: file.webkitRelativePath || file.name,
-          content: text,
+        out.push({
+          name: f.name,
+          mime: f.type || "application/octet-stream",
+          size: f.size,
+          path: f.webkitRelativePath || f.name,
+          dataBase64: b64,
         });
       }
-      return attachments;
+      return out;
     }
 
-    // Формирование текста сообщения с блоками кода из файлов
-    _formatFilesForRequest(attachments) {
-      if (!attachments || attachments.length === 0) return "";
-      let result = "";
-      attachments.forEach(att => {
-        // Экранируем тройные бэктики внутри содержимого
-        const safeContent = att.content.replace(/```/g, "\\`\\`\\`");
-        result += `\`\`\`${att.path}\n${safeContent}\n\`\`\`\n\n`;
-      });
-      return result.trim();
+    // ---------- формирование маркеров ----------
+    _formatFilesAsMarkers(attachments) {
+      return attachments
+          .filter(a => a.size <= MAX_INLINE_BYTES)
+          .map(a =>
+              `<!--DSFILE:BEGIN name=${encodeURIComponent(a.name)} ` +
+              `mime=${a.mime} size=${a.size} ` +
+              `path=${encodeURIComponent(a.path)} -->\n` +
+              a.dataBase64 + "\n" +
+              `<!--DSFILE:END-->`
+          )
+          .join("\n\n");
     }
 
+    // ---------- большие файлы — через /api/command ----------
+    async _sendLargeFiles(attachments) {
+      for (const a of attachments) {
+        if (a.size <= MAX_INLINE_BYTES) continue;
+        try {
+          // Серверу передаём путь + текст. Если файла на диске сервера
+          // нет — вернёт ошибку, но base64 всё равно уйдёт в /api/chat
+          await this.api.cmd("file", { path: a.path, text: "" });
+        } catch (e) {
+          console.warn("[chat] large file via /api/command failed:", e.message);
+        }
+      }
+    }
+
+    // ---------- отправка ----------
     async send(text, files = []) {
       if ((!text && files.length === 0) || this.busy) return;
       this.busy = true;
@@ -49,25 +76,43 @@
         this.els.emptyState.classList.add("hidden");
       }
 
+      // 1. Читаем файлы
       let attachments = [];
       if (files && files.length > 0) {
-        attachments = await this._readFiles(files);
+        try {
+          attachments = await this._readFiles(files);
+        } catch (e) {
+          console.error("[chat] read files failed:", e);
+          this.busy = false;
+          UI.appendMessage(this.els.messages, "Ошибка чтения файлов: " + e.message, "error");
+          return;
+        }
       }
 
-      // Формируем полный текст для отправки (с файлами)
-      const fileBlock = this._formatFilesForRequest(attachments);
-      const fullText = fileBlock ? `${text}\n\n${fileBlock}`.trim() : text;
+      // 2. Для больших файлов — отправим на сервер отдельно
+      if (attachments.some(a => a.size > MAX_INLINE_BYTES)) {
+        this._sendLargeFiles(attachments).catch(() => {});
+      }
 
-      // Добавляем в историю
+      // 3. Маркеры для маленьких/средних
+      const markers = this._formatFilesAsMarkers(attachments);
+      const fullText = markers
+          ? (text ? text + "\n\n" + markers : markers)
+          : text;
+
+      // 4. В историю — с маркерами (сервер их пробросит)
       this.history.push({ role: "user", content: fullText });
+
+      // 5. В UI — только чистый текст + плашки файлов
       UI.appendMessage(
-        this.els.messages,
-        text, // Отображаем только текст (без файлов) в истории
-        "outgoing",
-        UI.nowTime(),
-        attachments // Плашки файлов
+          this.els.messages,
+          text || "",
+          "outgoing",
+          UI.nowTime(),
+          attachments
       );
 
+      // 6. Запускаем стрим
       const typing = UI.appendMessage(this.els.messages, "", "incoming", UI.nowTime());
       typing.textContent = "";
       UI.setTyping(typing, true);
@@ -78,7 +123,6 @@
 
       const stream = this.api.chatStream(this.history);
       this.currentStream = stream;
-
       this._updateStopBtn(true);
 
       stream.onChunk((piece, type) => {
@@ -109,9 +153,7 @@
 
       stream.onError((err) => {
         UI.setTyping(typing, false);
-        if (!accResponse && !accThought) {
-            typing.parentNode.remove();
-        }
+        if (!accResponse && !accThought) typing.parentNode.remove();
         UI.appendMessage(this.els.messages, "Ошибка: " + (err.message || err), "error");
         this._finish();
       });
@@ -151,9 +193,9 @@
         const el = document.createElement("div");
         el.className = "empty-state";
         el.innerHTML =
-          '<div class="empty-icon">💬</div>' +
-          '<div class="empty-title">Начните диалог</div>' +
-          '<div class="empty-sub">Отправьте сообщение, чтобы DeepSeek ответил</div>';
+            '<div class="empty-icon">💬</div>' +
+            '<div class="empty-title">Начните диалог</div>' +
+            '<div class="empty-sub">Отправьте сообщение, чтобы DeepSeek ответил</div>';
         this.els.messages.appendChild(el);
         this.els.emptyState = el;
 

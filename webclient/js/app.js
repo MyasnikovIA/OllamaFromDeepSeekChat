@@ -28,6 +28,9 @@
     composer:       document.getElementById("composer-input"),
     sendBtn:        document.getElementById("send-btn"),
     stopBtn:        document.getElementById("stop-btn"),
+
+    attachBtn:      document.getElementById("attach-btn"),
+    fileInput:      document.getElementById("file-input"),
   };
 
   const state = {
@@ -40,7 +43,7 @@
     pollTimer: null,
     tabContainers: {},
     tabControllers: {},
-    pendingFiles: [], // файлы, ожидающие отправки
+    pendingFiles: [],
   };
 
   function initConnectScreen() {
@@ -51,7 +54,6 @@
     } else {
       UI.show(els.connectScreen);
     }
-
     els.connectBtn.addEventListener("click", () => connect(false));
     els.connectUrl.addEventListener("keydown", (e) => { if (e.key === "Enter") connect(false); });
   }
@@ -107,6 +109,7 @@
     bindChatEvents();
     bindModes();
     bindSidebar();
+    bindAttach();
 
     await refreshAll();
     await refreshBrowsers();
@@ -291,16 +294,13 @@
       els.composer.style.height = "auto";
       els.composer.style.height = Math.min(els.composer.scrollHeight, 160) + "px";
     });
-
     els.composer.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         sendCurrent();
       }
     });
-
     els.sendBtn.addEventListener("click", sendCurrent);
-
     els.stopBtn.addEventListener("click", async () => {
       if (!state.chat) return;
       await state.chat.stop();
@@ -309,29 +309,12 @@
       if (!state.chat) return;
       await state.chat.resume();
     });
-
-    // Прикрепление файлов
-    const attachBtn = document.getElementById("attach-btn");
-    const fileInput = document.getElementById("file-input");
-
-    if (attachBtn && fileInput) {
-      attachBtn.addEventListener("click", () => fileInput.click());
-
-      fileInput.addEventListener("change", () => {
-        state.pendingFiles = Array.from(fileInput.files);
-        fileInput.value = "";
-        if (state.pendingFiles.length > 0) {
-          els.composer.placeholder = `Прикреплено ${state.pendingFiles.length} файл(ов). Введите текст…`;
-        } else {
-          els.composer.placeholder = "Сообщение для DeepSeek… (Enter — отправить, Shift+Enter — перенос)";
-        }
-      });
-    }
   }
 
   async function sendCurrent() {
     const text = els.composer.value.trim();
-    if ((!text && state.pendingFiles.length === 0) || !state.chat) return;
+    if (!text && state.pendingFiles.length === 0) return;
+    if (!state.chat) return;
     if (!state.activeTabId) {
       alert("Нет активной вкладки DeepSeek");
       return;
@@ -339,13 +322,37 @@
 
     const filesToSend = state.pendingFiles.slice();
     state.pendingFiles = [];
-    const fileInput = document.getElementById("file-input");
-    if (fileInput) fileInput.value = "";
+    if (els.fileInput) els.fileInput.value = "";
     els.composer.value = "";
     els.composer.style.height = "auto";
     els.composer.placeholder = "Сообщение для DeepSeek… (Enter — отправить, Shift+Enter — перенос)";
 
     await state.chat.send(text, filesToSend);
+  }
+
+  function bindAttach() {
+    if (!els.attachBtn || !els.fileInput) return;
+
+    els.attachBtn.addEventListener("click", () => els.fileInput.click());
+
+    els.fileInput.addEventListener("change", () => {
+      const picked = Array.from(els.fileInput.files || []);
+      state.pendingFiles = state.pendingFiles.concat(picked);
+      els.fileInput.value = "";
+      updateAttachPlaceholder();
+    });
+  }
+
+  function updateAttachPlaceholder() {
+    if (!els.composer) return;
+    const n = state.pendingFiles.length;
+    if (n === 0) {
+      els.composer.placeholder = "Сообщение для DeepSeek… (Enter — отправить, Shift+Enter — перенос)";
+      return;
+    }
+    const names = state.pendingFiles.map(f => f.name).join(", ");
+    const short = names.length > 60 ? names.slice(0, 57) + "…" : names;
+    els.composer.placeholder = `Прикреплено (${n}): ${short}`;
   }
 
   function bindModes() {
