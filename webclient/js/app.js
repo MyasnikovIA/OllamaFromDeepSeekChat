@@ -44,8 +44,12 @@
     tabContainers: {},
     tabControllers: {},
     pendingFiles: [],
+    isChangingServer: false,
   };
 
+  // ----------------------------------------------------------
+  //  Подключение
+  // ----------------------------------------------------------
   function initConnectScreen() {
     const saved = window.DSConfig.getBaseUrl();
     if (saved) {
@@ -54,8 +58,10 @@
     } else {
       UI.show(els.connectScreen);
     }
-    els.connectBtn.addEventListener("click", () => connect(false));
-    els.connectUrl.addEventListener("keydown", (e) => { if (e.key === "Enter") connect(false); });
+    els.connectBtn.addEventListener("click", () => connect(state.isChangingServer));
+    els.connectUrl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") connect(state.isChangingServer);
+    });
   }
 
   async function autoConnect(url) {
@@ -63,7 +69,7 @@
       const api = new window.BridgeApi(url);
       await api.ping();
       state.api = api;
-      enterChat();
+      await enterChat();
     } catch (_) {
       UI.show(els.connectScreen);
     }
@@ -87,7 +93,7 @@
       if (isChange) {
         window.location.reload();
       } else {
-        enterChat();
+        await enterChat();
       }
     } catch (e) {
       setConnectStatus("Ошибка: " + e.message, true);
@@ -102,6 +108,9 @@
     els.connectStatus.classList.toggle("success", !isError && text === "OK");
   }
 
+  // ----------------------------------------------------------
+  //  Инициализация чата
+  // ----------------------------------------------------------
   async function enterChat() {
     UI.hide(els.connectScreen);
     UI.show(els.chatScreen);
@@ -111,8 +120,12 @@
     bindSidebar();
     bindAttach();
 
-    await refreshAll();
-    await refreshBrowsers();
+    try {
+      await refreshAll();
+      await refreshBrowsers();
+    } catch (e) {
+      renderStatus(false, e.message);
+    }
     startPolling();
   }
 
@@ -121,6 +134,9 @@
     state.pollTimer = setInterval(() => { refreshAll().catch(() => {}); }, 5000);
   }
 
+  // ----------------------------------------------------------
+  //  Синхронизация с сервером
+  // ----------------------------------------------------------
   async function refreshAll() {
     if (!state.api) return;
     try {
@@ -182,6 +198,9 @@
     }
   }
 
+  // ----------------------------------------------------------
+  //  Рендер
+  // ----------------------------------------------------------
   function renderTabs() {
     UI.renderTabs(els.tabsList, state.tabs, state.activeTabId, selectAndRefresh, async (tabId) => {
       try {
@@ -240,7 +259,18 @@
     UI.setStatus(els.statusPill, ok, ok ? "Подключено" : ("Нет связи: " + (detail || "")));
   }
 
+  // ----------------------------------------------------------
+  //  Переключение вкладок
+  // ----------------------------------------------------------
   async function selectAndRefresh(tabId) {
+    // При смене вкладки сбрасываем прикреплённые файлы,
+    // чтобы они случайно не улетели в чужой чат
+    if (tabId !== state.activeTabId) {
+      state.pendingFiles = [];
+      if (els.fileInput) els.fileInput.value = "";
+      updateAttachPlaceholder();
+    }
+
     state.activeTabId = tabId;
     try { await state.api.selectTab(tabId); } catch (_) {}
 
@@ -289,6 +319,9 @@
     state.chat = state.tabControllers[tabId];
   }
 
+  // ----------------------------------------------------------
+  //  Composer / send
+  // ----------------------------------------------------------
   function bindChatEvents() {
     els.composer.addEventListener("input", () => {
       els.composer.style.height = "auto";
@@ -325,11 +358,14 @@
     if (els.fileInput) els.fileInput.value = "";
     els.composer.value = "";
     els.composer.style.height = "auto";
-    els.composer.placeholder = "Сообщение для DeepSeek… (Enter — отправить, Shift+Enter — перенос)";
+    updateAttachPlaceholder();
 
     await state.chat.send(text, filesToSend);
   }
 
+  // ----------------------------------------------------------
+  //  Прикрепление файлов
+  // ----------------------------------------------------------
   function bindAttach() {
     if (!els.attachBtn || !els.fileInput) return;
 
@@ -346,6 +382,14 @@
   function updateAttachPlaceholder() {
     if (!els.composer) return;
     const n = state.pendingFiles.length;
+
+    // Обновляем title у кнопки 📎
+    if (els.attachBtn) {
+      els.attachBtn.title = n === 0
+          ? "Прикрепить файл"
+          : `Прикрепить файл (уже выбрано: ${n})`;
+    }
+
     if (n === 0) {
       els.composer.placeholder = "Сообщение для DeepSeek… (Enter — отправить, Shift+Enter — перенос)";
       return;
@@ -355,6 +399,9 @@
     els.composer.placeholder = `Прикреплено (${n}): ${short}`;
   }
 
+  // ----------------------------------------------------------
+  //  Режимы
+  // ----------------------------------------------------------
   function bindModes() {
     els.thinkToggle.addEventListener("change", async () => {
       if (!state.api) return;
@@ -383,26 +430,43 @@
     });
   }
 
+  // ----------------------------------------------------------
+  //  Sidebar
+  // ----------------------------------------------------------
   function bindSidebar() {
-    els.newChatBtn.addEventListener("click", async () => {
+    const doNewChat = async () => {
+      // Сбрасываем прикреплённые файлы
+      state.pendingFiles = [];
+      if (els.fileInput) els.fileInput.value = "";
+      updateAttachPlaceholder();
       if (state.chat) await state.chat.newChat();
-    });
+    };
+
+    els.newChatBtn.addEventListener("click", doNewChat);
     if (els.newChatTopBtn) {
-      els.newChatTopBtn.addEventListener("click", async () => {
-        if (state.chat) await state.chat.newChat();
-      });
+      els.newChatTopBtn.addEventListener("click", doNewChat);
     }
     els.refreshTabsBtn.addEventListener("click", () => { refreshAll().catch(() => {}); });
 
     if (els.changeServerBtn) {
       els.changeServerBtn.addEventListener("click", () => {
+        state.isChangingServer = true;
         UI.show(els.connectScreen);
-        els.connectBtn.onclick = () => connect(true);
+        els.connectUrl.focus();
       });
     }
   }
 
-  document.addEventListener("DOMContentLoaded", () => {
+  // ----------------------------------------------------------
+  //  Bootstrap
+  // ----------------------------------------------------------
+  function init() {
     initConnectScreen();
-  });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
 })();

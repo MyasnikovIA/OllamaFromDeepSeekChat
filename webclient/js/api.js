@@ -74,7 +74,22 @@
       return this.cmd("openBrowser", { index });
     }
 
-    // ---------- потоковый чат ----------
+    // ===== НОВОЕ: файл с диска сервера через /api/command type:"file" =====
+    // Использовать только если файл физически лежит на машине сервера.
+    async cmdFile(path, text = "") {
+      return this.cmd("file", { path, text });
+    }
+
+    // ----------------------------------------------------------
+    //  Потоковый чат
+    //
+    //  messages — массив {role, content}:
+    //    content может быть:
+    //      - строкой (простой текст)
+    //      - массивом [{type:"text"}, {type:"file", file:{...}}, ...]
+    //
+    //  Сервер (OllamaInputExtractor) умеет и то, и другое.
+    // ----------------------------------------------------------
     chatStream(messages, { signal } = {}) {
       const url = this.baseUrl + "/api/chat";
       const body = {
@@ -85,10 +100,27 @@
 
       const listeners = { chunk: [], done: [], error: [] };
       let aborted = false;
+      let finished = false;
+
       const ctrl = new AbortController();
       if (signal) {
-        signal.addEventListener("abort", () => { aborted = true; ctrl.abort(); }, { once: true });
+        signal.addEventListener("abort", () => {
+          aborted = true;
+          ctrl.abort();
+        }, { once: true });
       }
+
+      const emitError = (err) => {
+        if (finished) return;
+        finished = true;
+        if (!aborted) listeners.error.forEach(fn => { try { fn(err); } catch (_) {} });
+      };
+
+      const emitDone = () => {
+        if (finished) return;
+        finished = true;
+        listeners.done.forEach(fn => { try { fn(); } catch (_) {} });
+      };
 
       const promise = (async () => {
         let resp;
@@ -100,14 +132,14 @@
             signal: ctrl.signal,
           });
         } catch (e) {
-          if (!aborted) listeners.error.forEach(fn => fn(e));
+          emitError(e);
           return;
         }
 
         if (!resp.ok) {
           let errText = "HTTP " + resp.status;
           try { const j = await resp.json(); if (j.error) errText = j.error; } catch (_) {}
-          listeners.error.forEach(fn => fn(new Error(errText)));
+          emitError(new Error(errText));
           return;
         }
 
@@ -125,33 +157,49 @@
               const line = buf.slice(0, idx).trim();
               buf = buf.slice(idx + 1);
               if (!line) continue;
+
               let chunk;
               try { chunk = JSON.parse(line); } catch (_) { continue; }
 
               if (chunk.error) {
-                listeners.error.forEach(fn => fn(new Error(chunk.error)));
+                emitError(new Error(chunk.error));
                 return;
               }
 
-              if (chunk.message && chunk.message.content) {
-                listeners.chunk.forEach(fn => fn(chunk.message.content, chunk.type || "RESPONSE"));
+              // ---- контент ответа ----
+              if (chunk.message) {
+                if (typeof chunk.message.content === "string" && chunk.message.content) {
+                  listeners.chunk.forEach(fn => {
+                    try { fn(chunk.message.content, chunk.type || "RESPONSE"); } catch (_) {}
+                  });
+                }
+                // На будущее: OpenAI-совместимый reasoning
+                if (typeof chunk.message.reasoning_content === "string" && chunk.message.reasoning_content) {
+                  listeners.chunk.forEach(fn => {
+                    try { fn(chunk.message.reasoning_content, "THINK"); } catch (_) {}
+                  });
+                }
               }
 
               if (chunk.done) {
-                listeners.done.forEach(fn => fn());
+                emitDone();
                 return;
               }
             }
           }
-          listeners.done.forEach(fn => fn());
+          emitDone();
         } catch (e) {
-          if (!aborted) listeners.error.forEach(fn => fn(e));
+          emitError(e);
         }
       })();
 
       return {
         promise,
-        abort() { aborted = true; ctrl.abort(); },
+        abort() {
+          aborted = true;
+          try { ctrl.abort(); } catch (_) {}
+          finished = true;
+        },
         onChunk(fn) { listeners.chunk.push(fn); return this; },
         onDone(fn)  { listeners.done.push(fn);  return this; },
         onError(fn) { listeners.error.push(fn); return this; },

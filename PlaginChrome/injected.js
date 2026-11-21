@@ -168,6 +168,8 @@
     xhr.addEventListener("loadend", () => {
       if (target && streamId) {
         emit("", "done", streamId);
+        streamId = null;  // ===== ИЗМЕНЕНО: сброс =====
+        target = false;
       }
     });
 
@@ -220,7 +222,15 @@
     if (!el) return false;
     if (el.offsetParent === null && el.getClientRects().length === 0) return false;
     const r = el.getBoundingClientRect();
-    return r.width > 0 && r.height > 0;
+    if (r.width <= 0 || r.height <= 0) return false;
+    // ===== ИЗМЕНЕНО: отсекаем скрытые/невидимые =====
+    try {
+      const cs = getComputedStyle(el);
+      if (cs.visibility === "hidden" || cs.display === "none") return false;
+      if (parseFloat(cs.opacity) === 0) return false;
+    } catch (_) {}
+    if (el.getAttribute && el.getAttribute("aria-hidden") === "true") return false;
+    return true;
   }
 
   function findChatInputSync() {
@@ -273,10 +283,6 @@
     return attrs;
   }
 
-  /**
-   * Извлекает из текста маркеры файлов.
-   * Возвращает { cleanText, files: [{name,mime,size,path,dataBase64}] }.
-   */
   function extractFileMarkers(text) {
     const files = [];
     const clean = String(text || "").replace(FILE_MARKER_RE, (full, rawAttrs, payload) => {
@@ -329,7 +335,6 @@
     let input = document.querySelector('input[type="file"]');
     if (input) return input;
 
-    // fallback: нажать на кнопку «прикрепить» и подождать input
     const btns = document.querySelectorAll('[role="button"], button');
     for (const el of btns) {
       const label = (
@@ -367,7 +372,6 @@
         continue;
       }
       if (sawProgress && Date.now() - lastProgressAt > 800) {
-        // прогресс исчез → считаем завершённым
         const chips = countAttachmentChips();
         if (chips >= expected) return true;
       }
@@ -383,10 +387,11 @@
   }
 
   /**
+   * ===== ИЗМЕНЕНО: отдельная функция attachFiles =====
    * Вставляет массив файлов в input[type=file] DeepSeek.
    * @returns {Promise<boolean>} true если чипы файлов появились
    */
-  async function attachFilesToInput(files) {
+  async function attachFiles(files) {
     if (!files || files.length === 0) return true;
 
     const input = await findFileInput(8000);
@@ -433,17 +438,11 @@
 
     const ok = await waitForAttachments(files.length, 30000);
     if (!ok) {
-      // fallback через clipboard (имя + содержимое)
       await attachViaClipboard(files).catch(() => {});
     }
     return ok;
   }
 
-  /**
-   * Fallback: копирует каждый файл (имя + \n + содержимое) в буфер
-   * и пытается вставить в поле ввода.
-   * Полезно, если input[type=file] не сработал.
-   */
   async function attachViaClipboard(files) {
     const input = findChatInputSync();
     if (!input) return false;
@@ -469,11 +468,9 @@
 
       if (!wrote) break;
 
-      // Пытаемся вставить содержимое буфера
       try {
         document.execCommand("paste");
       } catch (_) {
-        // на всякий случай — вставим программно
         insertTextIntoInput(input, clip);
       }
       await sleep(300);
@@ -481,11 +478,17 @@
     return true;
   }
 
+  /**
+   * ===== ИЗМЕНЕНО: надёжная вставка текста в актуальный composer =====
+   * Повторно ищет элемент, ставит фокус, вставляет текст.
+   * Работает и с textarea/input, и с contenteditable.
+   */
   function insertTextIntoInput(input, text) {
-    if (!input) return;
+    if (!input) return false;
     input.focus();
 
     if (input.isContentEditable) {
+      // Очищаем и вставляем
       const range = document.createRange();
       range.selectNodeContents(input);
       range.collapse(false);
@@ -493,13 +496,16 @@
       sel.removeAllRanges();
       sel.addRange(range);
 
-      const ok = document.execCommand("insertText", false, text);
+      let ok = false;
+      try { ok = document.execCommand("insertText", false, text); } catch (_) {}
       if (!ok) {
+        // Fallback: прямое изменение textContent
         input.textContent = (input.textContent || "") + text;
         input.dispatchEvent(new InputEvent("input", {
           bubbles: true, data: text, inputType: "insertText"
         }));
       }
+      return true;
     } else if (input.tagName === "TEXTAREA" || input.tagName === "INPUT") {
       const proto = input.tagName === "TEXTAREA"
           ? HTMLTextAreaElement.prototype
@@ -508,7 +514,93 @@
       setter.call(input, text);
       input.dispatchEvent(new Event("input", { bubbles: true }));
       input.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
     }
+    return false;
+  }
+
+  /**
+   * ===== НОВОЕ: отдельная функция setText =====
+   * Повторно находит composer (после attach DOM мог измениться),
+   * ставит фокус, вставляет текст.
+   * @returns {Promise<boolean>}
+   */
+  async function setText(text) {
+    if (!text) return true;
+
+    // Повторный поиск после возможной перерисовки DOM
+    const input = await findChatInput(10000);
+    if (!input) {
+      console.error("[DS-MARKER] chat input not found");
+      return false;
+    }
+
+    const rect = input.getBoundingClientRect();
+    const mouseOpts = {
+      bubbles: true, cancelable: true, view: window,
+      clientX: rect.left + rect.width / 2,
+      clientY: rect.top + rect.height / 2,
+      button: 0, buttons: 1
+    };
+    input.dispatchEvent(new MouseEvent("mousedown", mouseOpts));
+    input.dispatchEvent(new MouseEvent("mouseup", mouseOpts));
+    input.dispatchEvent(new MouseEvent("click", mouseOpts));
+    input.focus();
+
+    await sleep(50);
+    const ok = insertTextIntoInput(input, text);
+    await sleep(150);
+    return ok;
+  }
+
+  /**
+   * ===== НОВОЕ: отдельная функция clickSend =====
+   * Находит кнопку отправки, ждёт её активации, кликает.
+   * @returns {Promise<boolean>}
+   */
+  async function clickSend() {
+    let sendBtn = null;
+    const btnStart = Date.now();
+    while (Date.now() - btnStart < 20000) {
+      if (!sendBtn) {
+        const icons = document.querySelectorAll(".ds-button__icon.ds-button__icon--last-child");
+        for (const icon of icons) {
+          const path = icon.querySelector("svg path");
+          if (path && /M8\.3125\s+0\.980206/.test(path.getAttribute("d") || "")) {
+            sendBtn = icon.closest(".ds-button") || icon.closest("button") ||
+                icon.parentElement || icon;
+            break;
+          }
+        }
+      }
+      if (sendBtn) {
+        const disabled = sendBtn.disabled
+            || sendBtn.getAttribute("aria-disabled") === "true";
+        if (!disabled) break;
+      }
+      await sleep(100);
+    }
+
+    if (!sendBtn) {
+      console.error("[DS] Кнопка отправки не найдена");
+      return false;
+    }
+    if (sendBtn.disabled || sendBtn.getAttribute("aria-disabled") === "true") {
+      console.error("[DS] Кнопка отправки заблокирована");
+      return false;
+    }
+
+    const bRect = sendBtn.getBoundingClientRect();
+    const bOpts = {
+      bubbles: true, cancelable: true, view: window,
+      clientX: bRect.left + bRect.width / 2,
+      clientY: bRect.top + bRect.height / 2,
+      button: 0, buttons: 1
+    };
+    sendBtn.dispatchEvent(new MouseEvent("mousedown", bOpts));
+    sendBtn.dispatchEvent(new MouseEvent("mouseup", bOpts));
+    sendBtn.dispatchEvent(new MouseEvent("click", bOpts));
+    return true;
   }
 
   // ============================================================
@@ -615,7 +707,7 @@
   }
 
   // ============================================================
-  //  sendToDeepSeek
+  //  sendToDeepSeek — теперь разделён на 3 шага
   // ============================================================
   async function sendToDeepSeek(text, files) {
     stopRequested = false;
@@ -632,78 +724,29 @@
         " (" + allFiles.map(f => f.name).join(", ") + ")"
     );
 
-    // 2. Прикрепляем файлы (DataTransfer → input[type=file])
+    // 2. ШАГ A: прикрепляем файлы (если есть)
     if (allFiles.length > 0) {
-      await attachFilesToInput(allFiles);
-    }
-
-    // 3. Вставляем чистый текст
-    if (!cleanText) {
-      // Если файлов нет и текста нет — нечего отправлять
-      if (allFiles.length === 0) {
-        throw new Error("[DS] no content to send");
+      const attached = await attachFiles(allFiles);
+      if (!attached) {
+        console.warn("[DS-MARKER] attachFiles returned false — продолжаем, но файлы могли не прикрепиться");
       }
     }
 
-    const input = await findChatInput(10000);
-    if (!input) throw new Error("[DS] Поле ввода не найдено");
-
+    // 3. ШАГ B: вставляем текст (отдельная функция, повторный поиск composer)
     if (cleanText) {
-      const rect = input.getBoundingClientRect();
-      const mouseOpts = {
-        bubbles: true, cancelable: true, view: window,
-        clientX: rect.left + rect.width / 2,
-        clientY: rect.top + rect.height / 2,
-        button: 0, buttons: 1
-      };
-      input.dispatchEvent(new MouseEvent("mousedown", mouseOpts));
-      input.dispatchEvent(new MouseEvent("mouseup", mouseOpts));
-      input.dispatchEvent(new MouseEvent("click", mouseOpts));
-      input.focus();
-
-      await sleep(50);
-      insertTextIntoInput(input, cleanText);
-      await sleep(150);
-    }
-
-    // 4. Отправка
-    let sendBtn = null;
-    const btnStart = Date.now();
-    while (Date.now() - btnStart < 20000) {
-      if (!sendBtn) {
-        const icons = document.querySelectorAll(".ds-button__icon.ds-button__icon--last-child");
-        for (const icon of icons) {
-          const path = icon.querySelector("svg path");
-          if (path && /M8\.3125\s+0\.980206/.test(path.getAttribute("d") || "")) {
-            sendBtn = icon.closest(".ds-button") || icon.closest("button") ||
-                icon.parentElement || icon;
-            break;
-          }
-        }
+      const textOk = await setText(cleanText);
+      if (!textOk) {
+        throw new Error("[DS] Не удалось вставить текст в поле ввода");
       }
-      if (sendBtn) {
-        const disabled = sendBtn.disabled
-            || sendBtn.getAttribute("aria-disabled") === "true";
-        if (!disabled) break;
-      }
-      await sleep(100);
+    } else if (allFiles.length === 0) {
+      throw new Error("[DS] no content to send");
     }
 
-    if (!sendBtn) throw new Error("[DS] Кнопка отправки не найдена");
-    if (sendBtn.disabled || sendBtn.getAttribute("aria-disabled") === "true") {
-      throw new Error("[DS] Кнопка отправки заблокирована");
+    // 4. ШАГ C: запускаем отправку (отдельная функция)
+    const sent = await clickSend();
+    if (!sent) {
+      throw new Error("[DS] Не удалось нажать кнопку отправки");
     }
-
-    const bRect = sendBtn.getBoundingClientRect();
-    const bOpts = {
-      bubbles: true, cancelable: true, view: window,
-      clientX: bRect.left + bRect.width / 2,
-      clientY: bRect.top + bRect.height / 2,
-      button: 0, buttons: 1
-    };
-    sendBtn.dispatchEvent(new MouseEvent("mousedown", bOpts));
-    sendBtn.dispatchEvent(new MouseEvent("mouseup", bOpts));
-    sendBtn.dispatchEvent(new MouseEvent("click", bOpts));
 
     console.log("[DS] ✔ Отправлено (cleanText:", cleanText.length, "chars, files:", allFiles.length, ")");
     return true;
@@ -869,6 +912,11 @@
   window.stopGeneration      = stopGeneration;
   window.resumeGeneration    = resumeGeneration;
 
+  // ===== НОВОЕ: публичные шаги для отладки/ручного вызова =====
+  window.dsAttachFiles       = attachFiles;
+  window.dsSetText           = setText;
+  window.dsClickSend         = clickSend;
+
   setupContinueWatcher();
 
   // ---------- приём команд ----------
@@ -885,6 +933,24 @@
           window.sendToDeepSeek(data.text, data.files)
               .then(() => emitResult(true, "sent"))
               .catch((e) => emitResult(false, "send failed: " + (e && e.message || e)));
+          return;
+        case "attach":
+          // ===== НОВОЕ: отдельная команда прикрепления файлов =====
+          attachFiles(data.files || [])
+              .then((ok) => emitResult(ok, ok ? "attached" : "attach failed"))
+              .catch((e) => emitResult(false, "attach failed: " + (e && e.message || e)));
+          return;
+        case "setText":
+          // ===== НОВОЕ: отдельная команда вставки текста =====
+          setText(data.text || "")
+              .then((ok) => emitResult(ok, ok ? "text set" : "setText failed"))
+              .catch((e) => emitResult(false, "setText failed: " + (e && e.message || e)));
+          return;
+        case "clickSend":
+          // ===== НОВОЕ: отдельная команда отправки =====
+          clickSend()
+              .then((ok) => emitResult(ok, ok ? "sent" : "clickSend failed"))
+              .catch((e) => emitResult(false, "clickSend failed: " + (e && e.message || e)));
           return;
         case "newChat":
           window.newChat()
@@ -957,4 +1023,5 @@
   console.info("[DS-INTERCEPT] fetch/XHR patched →", TARGET_PATH);
   console.info("[DS-INTERCEPT] window.{sendToDeepSeek,newChat,enableThinking,disableThinking,enableSmartSearch,disableSmartSearch,stopGeneration,resumeGeneration} attached");
   console.info("[DS-INTERCEPT] marker support: <!--DSFILE:BEGIN ... -->base64<!--DSFILE:END-->");
+  console.info("[DS-INTERCEPT] split mode: attachFiles / setText / clickSend");
 })();

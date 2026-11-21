@@ -13,10 +13,13 @@
       return String(s)
           .replace(/&/g, "&amp;")
           .replace(/</g, "&lt;")
-          .replace(/>/g, "&gt;");
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;");
     },
 
     // ---------- убираем маркеры файлов из текста ----------
+    // Оставлено для обратной совместимости: если сервер вернёт
+    // старый формат с маркерами в тексте — они не попадут в UI.
     stripFileMarkers(text) {
       return String(text || "")
           .replace(/<!--DSFILE:BEGIN[\s\S]*?<!--DSFILE:END-->/g, "")
@@ -34,10 +37,48 @@
       const codeBlocks = [];
       html = html.replace(/```([\w-]*)\n?([\s\S]*?)```/g, (_, lang, code) => {
         codeBlocks.push({ lang: lang || "", code });
-        return `\u0000CODE_BLOCK_${codeBlocks.length - 1}\u0000`;
+        return `\u0000CODE_${codeBlocks.length - 1}\u0000`;
       });
 
-      // 2. Заголовки
+      // 2. Инлайн-код `...` — выносим ДО bold/italic,
+      //    чтобы `*x*` внутри кода не превращалось в <em>.
+      const inlineCodes = [];
+      html = html.replace(/`([^`\n]+)`/g, (_, code) => {
+        inlineCodes.push(code);
+        return `\u0000INLINE_${inlineCodes.length - 1}\u0000`;
+      });
+
+      // 3. Ссылки [text](url) — выносим до bold/italic.
+      //    URL пропускаем только http(s)/mailto, чтобы не пускать javascript:.
+      const links = [];
+      html = html.replace(
+          /\[([^\]]+)\]\((https?:\/\/[^)\s]+|mailto:[^)\s]+)\)/g,
+          (_, text, url) => {
+            links.push({ text, url });
+            return `\u0000LINK_${links.length - 1}\u0000`;
+          }
+      );
+      // «Голые» URL
+      html = html.replace(
+          /(^|[\s(])((?:https?:\/\/)[^\s<)]+)/g,
+          (m, pre, url) => {
+            links.push({ text: url, url });
+            return `${pre}\u0000LINK_${links.length - 1}\u0000`;
+          }
+      );
+
+      // 4. Strikethrough
+      html = html.replace(/~~([^~\n]+)~~/g, "<del>$1</del>");
+
+      // 5. Bold / italic
+      html = html.replace(/\*\*\*([^*\n]+)\*\*\*/g, "<strong><em>$1</em></strong>");
+      html = html.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+      // *italic* только по границам слова, чтобы не ломать a*b*c
+      html = html.replace(/(^|[^\w*])\*([^*\n]+)\*(?=[^\w*]|$)/g, "$1<em>$2</em>");
+      // _italic_ только по границам слова — не трогает snake_case
+      html = html.replace(/(^|[^\w])_([^_\n]+)_(?=[^\w]|$)/g, "$1<em>$2</em>");
+
+      // 6. Заголовки
       html = html.replace(/^###### (.*)$/gim, "<h6>$1</h6>");
       html = html.replace(/^##### (.*)$/gim, "<h5>$1</h5>");
       html = html.replace(/^#### (.*)$/gim, "<h4>$1</h4>");
@@ -45,34 +86,26 @@
       html = html.replace(/^## (.*)$/gim, "<h2>$1</h2>");
       html = html.replace(/^# (.*)$/gim, "<h1>$1</h1>");
 
-      // 3. Жирный и курсив
-      html = html.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
-      html = html.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
-      html = html.replace(/_([^_\n]+)_/g, "<em>$1</em>");
-
-      // 4. Инлайн-код
-      html = html.replace(/`([^`\n]+)`/g, '<span class="msg-inline-code">$1</span>');
-
-      // 5. Списки
+      // 7. Списки
       html = html.replace(/^\s*[-*]\s+(.*)$/gim, "<li>$1</li>");
       html = html.replace(/(?:^|\n)((?:<li>.*<\/li>\n?)+)/g, (m, group) =>
           "<ul>" + group.trim() + "</ul>\n");
 
-      // 6. Горизонтальная линия
+      // 8. Горизонтальная линия
       html = html.replace(/^---$/gim, "<hr>");
 
-      // 7. Абзацы
+      // 9. Абзацы
       const lines = html.split("\n");
       const out = [];
       let inP = false;
-      const blockTags = /^<(h\d|ul|li|hr|pre|div)/;
+      const blockTags = /^<(h\d|ul|li|hr|pre|div|del)/;
       for (const line of lines) {
         const t = line.trim();
         if (!t) {
           if (inP) { out.push("</p>"); inP = false; }
           continue;
         }
-        if (blockTags.test(t) || t.startsWith("\u0000CODE_BLOCK_") || t === "</ul>") {
+        if (blockTags.test(t) || t.startsWith("\u0000CODE_") || t === "</ul>") {
           if (inP) { out.push("</p>"); inP = false; }
           out.push(line);
         } else {
@@ -83,14 +116,35 @@
       if (inP) out.push("</p>");
       html = out.join("\n");
 
-      // 8. Восстанавливаем блоки кода
-      html = html.replace(/\u0000CODE_BLOCK_(\d+)\u0000/g, (_, i) => {
+      // 10. Восстанавливаем ссылки
+      html = html.replace(/\u0000LINK_(\d+)\u0000/g, (_, i) => {
+        const l = links[Number(i)];
+        if (!l) return "";
+        return (
+            `<a href="${this.esc(l.url)}" target="_blank" ` +
+            `rel="noopener noreferrer">${this.esc(l.text)}</a>`
+        );
+      });
+
+      // 11. Восстанавливаем инлайн-код
+      html = html.replace(/\u0000INLINE_(\d+)\u0000/g, (_, i) => {
+        const code = inlineCodes[Number(i)] || "";
+        return `<span class="msg-inline-code">${this.esc(code)}</span>`;
+      });
+
+      // 12. Восстанавливаем блоки кода
+      html = html.replace(/\u0000CODE_(\d+)\u0000/g, (_, i) => {
         const b = codeBlocks[Number(i)];
+        if (!b) return "";
         const escaped = this.esc(b.code.replace(/^\n|\n$/g, ""));
-        const lang = b.lang ? `<span class="code-lang">${this.esc(b.lang)}</span>` : "";
+        const lang = b.lang
+            ? `<span class="code-lang">${this.esc(b.lang)}</span>`
+            : "";
         return (
             `<div class="code-container">` +
-            `<button class="copy-code-btn" data-code="${encodeURIComponent(b.code)}" title="Копировать код">📋</button>` +
+            `<button class="copy-code-btn" ` +
+            `data-code="${this.esc(encodeURIComponent(b.code))}" ` +
+            `title="Копировать код">📋</button>` +
             (lang ? `<div class="code-header">${lang}</div>` : "") +
             `<pre class="msg-code">${escaped}</pre>` +
             `</div>`
@@ -110,9 +164,24 @@
             const orig = btn.innerHTML;
             btn.innerHTML = "✅";
             setTimeout(() => (btn.innerHTML = orig), 1500);
-          });
+          }).catch(() => {});
         };
       });
+    },
+
+    // ---------- иконка по mime ----------
+    mimeIcon(mime, name) {
+      const m = (mime || "").toLowerCase();
+      const n = (name || "").toLowerCase();
+      if (m.startsWith("image/")) return "🖼";
+      if (m.startsWith("audio/")) return "🎵";
+      if (m.startsWith("video/")) return "🎬";
+      if (m === "application/pdf" || n.endsWith(".pdf")) return "📕";
+      if (/zip|rar|7z|tar|gz/.test(m) || /\.(zip|rar|7z|tar|gz)$/.test(n)) return "🗜";
+      if (/json|xml|yaml/.test(m) || /\.(json|xml|yml|yaml)$/.test(n)) return "🧾";
+      if (/javascript|typescript/.test(m) || /\.(js|ts|jsx|tsx)$/.test(n)) return "📜";
+      if (/^text\//.test(m) || /\.(txt|md|log|csv)$/.test(n)) return "📄";
+      return "📎";
     },
 
     // ---------- рендер вложений (плашки) ----------
@@ -126,41 +195,61 @@
 
         const bar = document.createElement("div");
         bar.className = "file-attachment";
-        bar.innerHTML =
-            `<span class="file-icon">📄</span>` +
-            `<span class="file-name">${this.esc(att.name)}</span>` +
-            (att.size
-                ? `<span class="file-size">${this.humanSize(att.size)}</span>`
-                : "") +
-            `<span class="file-expand-hint">▶</span>`;
 
-        bar.onclick = (e) => {
-          e.stopPropagation();
-          const opened = item.classList.toggle("open");
-          const hint = bar.querySelector(".file-expand-hint");
-          if (hint) hint.textContent = opened ? "▼" : "▶";
-        };
+        const icon = document.createElement("span");
+        icon.className = "file-icon";
+        icon.textContent = this.mimeIcon(att.mime, att.name);
 
-        const content = document.createElement("div");
-        content.className = "file-content";
-        content.textContent = att.content || "";
+        const name = document.createElement("span");
+        name.className = "file-name";
+        name.textContent = att.name || "file";
 
-        // Кнопка копирования содержимого
-        const copy = document.createElement("button");
-        copy.className = "file-copy-btn";
-        copy.innerHTML = "📋";
-        copy.title = "Копировать содержимое";
-        copy.onclick = (e) => {
-          e.stopPropagation();
-          navigator.clipboard.writeText(att.content || "").then(() => {
-            copy.innerHTML = "✅";
-            setTimeout(() => (copy.innerHTML = "📋"), 1500);
-          });
-        };
+        const size = document.createElement("span");
+        size.className = "file-size";
+        size.textContent = att.size ? this.humanSize(att.size) : "";
+
+        const hint = document.createElement("span");
+        hint.className = "file-expand-hint";
+        hint.textContent = att.content ? "▶" : "";
+
+        bar.appendChild(icon);
+        bar.appendChild(name);
+        bar.appendChild(size);
+        bar.appendChild(hint);
+
+        if (att.content) {
+          bar.onclick = (e) => {
+            e.stopPropagation();
+            const opened = item.classList.toggle("open");
+            hint.textContent = opened ? "▼" : "▶";
+          };
+        } else {
+          bar.classList.add("no-preview");
+        }
 
         item.appendChild(bar);
-        item.appendChild(content);
-        item.appendChild(copy);
+
+        if (att.content) {
+          const content = document.createElement("div");
+          content.className = "file-content";
+          content.textContent = att.content;
+
+          const copy = document.createElement("button");
+          copy.className = "file-copy-btn";
+          copy.innerHTML = "📋";
+          copy.title = "Копировать содержимое";
+          copy.onclick = (e) => {
+            e.stopPropagation();
+            navigator.clipboard.writeText(att.content).then(() => {
+              copy.innerHTML = "✅";
+              setTimeout(() => (copy.innerHTML = "📋"), 1500);
+            }).catch(() => {});
+          };
+
+          item.appendChild(content);
+          item.appendChild(copy);
+        }
+
         wrap.appendChild(item);
       });
 
@@ -175,6 +264,24 @@
       return n.toFixed(n >= 10 || i === 0 ? 0 : 1) + " " + units[i];
     },
 
+    // ---------- бейдж количества файлов на 📎 ----------
+    setAttachBadge(btn, count) {
+      if (!btn) return;
+      let badge = btn.querySelector(".attach-badge");
+      if (count > 0) {
+        if (!badge) {
+          badge = document.createElement("span");
+          badge.className = "attach-badge";
+          btn.appendChild(badge);
+        }
+        badge.textContent = String(count);
+        btn.classList.add("has-files");
+      } else {
+        if (badge) badge.remove();
+        btn.classList.remove("has-files");
+      }
+    },
+
     // ---------- appendMessage ----------
     appendMessage(container, text, kind, meta, attachments) {
       const row = document.createElement("div");
@@ -184,12 +291,10 @@
       el.className = "message " + kind;
       if (kind === "thought") el.classList.add("thought");
 
-      // Плашки файлов (сверху)
       if (attachments && attachments.length > 0) {
         el.appendChild(this.renderAttachments(attachments));
       }
 
-      // Текст через Markdown-парсер (маркеры вычищены)
       const cleanText = this.stripFileMarkers(text || "");
       if (cleanText) {
         const textDiv = document.createElement("div");
@@ -198,7 +303,6 @@
         el.appendChild(textDiv);
       }
 
-      // Кнопка копирования всего сообщения
       const copyBtn = document.createElement("button");
       copyBtn.className = "copy-btn";
       copyBtn.innerHTML = "📋";
@@ -208,7 +312,7 @@
         navigator.clipboard.writeText(cleanText).then(() => {
           copyBtn.innerHTML = "✅";
           setTimeout(() => (copyBtn.innerHTML = "📋"), 1500);
-        });
+        }).catch(() => {});
       };
       el.appendChild(copyBtn);
 
