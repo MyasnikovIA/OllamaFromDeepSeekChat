@@ -79,8 +79,9 @@ public final class ChromeLauncher {
     }
 
     // ============================================================
-    //  DeepSeek-окно одного профиля (режим --app + user-data-dir)
-    //  Браузер берётся из Config.getChromePath().
+    //  DeepSeek-окно одного профиля (--user-data-dir).
+    //  Режим отображения адресной строки управляется
+    //  Config.get().isHideAddressBar().
     // ============================================================
     static void launchBrowser(BrowserConfig bc, OS os, String url) {
         if (!bc.isValid()) {
@@ -96,9 +97,15 @@ public final class ChromeLauncher {
         }
 
         List<String> args = new ArrayList<>();
-        // args.add("--no-first-run");
-        //args.add("--no-default-browser-check");
-        args.add("--app=" + url);
+        args.add("--no-first-run");
+        args.add("--no-default-browser-check");
+
+        if (Config.get().isHideAddressBar()) {
+            args.add("--app=" + url);      // режим приложения (без адресной строки)
+        } else {
+            args.add(url);                 // обычное окно (с адресной строкой)
+        }
+
         if (bc.userDataDir != null && !bc.userDataDir.isEmpty()) {
             args.add("--user-data-dir=" + bc.userDataDir);
         }
@@ -109,7 +116,9 @@ public final class ChromeLauncher {
     }
 
     // ============================================================
-    //  Fallback: один экземпляр в профиле по умолчанию (--app).
+    //  Fallback: один экземпляр в профиле по умолчанию.
+    //  Режим отображения адресной строки управляется
+    //  Config.get().isHideAddressBar().
     // ============================================================
     static void fallbackAutoLaunch(OS os, String url) {
         String chrome = pickExecutable(os);
@@ -122,7 +131,12 @@ public final class ChromeLauncher {
         List<String> args = new ArrayList<>();
         args.add("--no-first-run");
         args.add("--no-default-browser-check");
-        args.add("--app=" + url);
+
+        if (Config.get().isHideAddressBar()) {
+            args.add("--app=" + url);      // режим приложения (без адресной строки)
+        } else {
+            args.add(url);                 // обычное окно (с адресной строкой)
+        }
 
         String profileDir = System.getProperty("ds.profile.dir");
         if (profileDir != null && !profileDir.isEmpty()) {
@@ -248,44 +262,53 @@ public final class ChromeLauncher {
     }
 
     static String findChromeWindows() {
-        String[] envRoots = {"ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"};
-        for (String env : envRoots) {
-            String root = System.getenv(env);
-            if (root == null) continue;
-            File f = new File(root, "Google\\Chrome\\Application\\chrome.exe");
+        String[] candidates = {
+                "C:/Program Files/Google/Chrome/Application/chrome.exe",
+                "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
+                System.getenv("LOCALAPPDATA") + "/Google/Chrome/Application/chrome.exe",
+                "C:/ChromeForTesting/chrome-win64/chrome.exe"
+        };
+        for (String c : candidates) {
+            if (c == null) continue;
+            File f = new File(c);
             if (f.isFile()) return f.getAbsolutePath();
         }
-        return which("chrome.exe");
+        String p = which("chrome.exe");
+        if (p != null) return p;
+        return which("chrome");
     }
 
     static String findChromeMac() {
         String[] candidates = {
-                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-                System.getProperty("user.home")
-                        + "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-                "/Applications/Chromium.app/Contents/MacOS/Chromium"
+                "/Applications/Google Chrome.app",
+                "/Applications/Chromium.app",
+                System.getProperty("user.home") + "/Applications/Google Chrome.app"
         };
         for (String c : candidates) {
-            File f = new File(c);
-            if (f.isFile() && f.canExecute()) return f.getAbsolutePath();
+            if (c != null && new File(c).isDirectory()) return c;
         }
         return null;
     }
 
     static String findChromeLinux() {
-        for (String n : new String[]{
-                "google-chrome", "google-chrome-stable", "chromium", "chromium-browser"}) {
+        String[] names = {
+                "google-chrome", "google-chrome-stable",
+                "chromium", "chromium-browser", "chrome"
+        };
+        for (String n : names) {
             String p = which(n);
             if (p != null) return p;
         }
         return null;
     }
 
+    /** Аналог `which` — поиск в PATH. */
     static String which(String name) {
-        if (name == null) return null;
         String path = System.getenv("PATH");
         if (path == null) return null;
-        for (String dir : path.split(File.pathSeparator)) {
+        String sep = File.pathSeparator;
+        for (String dir : path.split(java.util.regex.Pattern.quote(sep))) {
+            if (dir.isEmpty()) continue;
             File f = new File(dir, name);
             if (f.isFile() && f.canExecute()) return f.getAbsolutePath();
         }
@@ -293,41 +316,27 @@ public final class ChromeLauncher {
     }
 
     // ============================================================
-    //  Default browser (best effort)
+    //  Fallback: открыть URL системным браузером
     // ============================================================
     static void openDefaultBrowser(OS os, String url) {
-        List<String> cmd = new ArrayList<>();
-        switch (os) {
-            case WINDOWS:
-                cmd.add("cmd.exe");
-                cmd.add("/c");
-                cmd.add("start");
-                cmd.add("");
-                cmd.add(url);
-                break;
-            case MACOS:
-                cmd.add("open");
-                cmd.add(url);
-                break;
-            case LINUX:
-            case UNKNOWN:
-            default:
-                cmd.add("xdg-open");
-                cmd.add(url);
-                break;
-        }
         try {
-            ProcessBuilder pb = new ProcessBuilder(cmd);
-            pb.redirectErrorStream(true);
-            pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
-            pb.start();
-            System.out.println("[CHROME] default browser opened: " + url);
+            switch (os) {
+                case WINDOWS:
+                    new ProcessBuilder("rundll32", "url.dll,FileProtocolHandler", url).start();
+                    break;
+                case MACOS:
+                    new ProcessBuilder("open", url).start();
+                    break;
+                default:
+                    new ProcessBuilder("xdg-open", url).start();
+                    break;
+            }
         } catch (IOException e) {
-            System.err.println("[CHROME] default browser failed: " + e.getMessage());
+            System.err.println("[CHROME] cannot open default browser: " + e.getMessage());
         }
     }
 
     private static boolean isNonEmpty(String s) {
-        return s != null && !s.trim().isEmpty();
+        return s != null && !s.isEmpty();
     }
 }

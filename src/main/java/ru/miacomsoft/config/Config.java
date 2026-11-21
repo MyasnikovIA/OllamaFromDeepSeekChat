@@ -28,6 +28,7 @@ import java.util.Locale;
  *      Пусто (""/null) — авто-поиск Chrome, иначе системный браузер.
  *   5) browsers — массив профилей (--user-data-dir). Каждая запись —
  *      отдельный экземпляр. Допустимы строки либо {"userDataDir": "..."}.
+ *   6) hideAddressBar — режим отображения адресной строки у DeepSeek-окон.
  */
 public final class Config {
 
@@ -92,6 +93,21 @@ public final class Config {
     "chromePathLinux": "",
 
     /* ============================================================
+       СКРЫТЬ АДРЕСНУЮ СТРОКУ (режим --app).
+
+       • false (по умолчанию) — обычное окно Chrome:
+         адресная строка, вкладки, меню.
+       • true — режим приложения: окно без адресной строки,
+         без вкладок и без меню (флаг --app=<url>).
+
+       Применяется и к DeepSeek-профилям (browsers),
+       и к одиночному fallback-окну.
+       На popup-окна почты (mailClientUrl / mailAdminUrl) НЕ влияет —
+       они всегда открываются в обычном режиме.
+       ============================================================ */
+    "hideAddressBar": false,
+
+    /* ============================================================
        СПИСОК ПРОФИЛЕЙ (--user-data-dir).
 
        Каждая запись — ОТДЕЛЬНЫЙ запускаемый экземпляр браузера
@@ -147,6 +163,7 @@ public final class Config {
 
     private String  chromePathWindows = "";
     private String  chromePathLinux   = "";
+    private boolean hideAddressBar    = false;   // ← НОВОЕ
 
     private List<BrowserConfig> browsers = Collections.emptyList();
 
@@ -259,16 +276,14 @@ public final class Config {
                     continue;
                 }
 
-                // /* ... */ — до закрывающего */ (переводы строк внутри
-                // комментария превращаем в '\n', чтобы сохранить нумерацию)
+                // /* ... */ — блок; переводы строк внутри сохраняем
                 if (c2 == '*') {
                     i += 2;
-                    while (i + 1 < n
-                            && !(src.charAt(i) == '*' && src.charAt(i + 1) == '/')) {
+                    while (i + 1 < n && !(src.charAt(i) == '*' && src.charAt(i + 1) == '/')) {
                         if (src.charAt(i) == '\n') out.append('\n');
                         i++;
                     }
-                    i += 2; // пропускаем "*/"
+                    i = Math.min(i + 2, n);
                     continue;
                 }
             }
@@ -279,70 +294,78 @@ public final class Config {
         return out.toString();
     }
 
-    /** Пишет шаблон config.json по указанному пути (создаёт каталоги). */
+    private static void printJsonError(String json, JSONException e) {
+        int line = 1, col = 1;
+        String msg = String.valueOf(e.getMessage());
+        // org.json обычно даёт позицию в сообщении — попробуем вытащить
+        try {
+            int at = msg.indexOf(" at ");
+            if (at > 0) {
+                int pos = Integer.parseInt(msg.substring(at + 4).replaceAll("[^0-9].*$", ""));
+                for (int k = 0; k < Math.min(pos, json.length()); k++) {
+                    if (json.charAt(k) == '\n') { line++; col = 1; }
+                    else col++;
+                }
+            }
+        } catch (Exception ignored) {}
+        System.err.println("[CONFIG] JSON parse error at line " + line + ", col " + col
+                + ": " + e.getMessage());
+    }
+
     private static void writeDefaultConfig(File file) throws IOException {
-        File abs = file.getAbsoluteFile();
-        File parent = abs.getParentFile();
+        File parent = file.getParentFile();
         if (parent != null && !parent.exists()) {
+            //noinspection ResultOfMethodCallIgnored
             parent.mkdirs();
         }
-        Files.write(abs.toPath(),
+        Files.write(file.toPath(),
                 DEFAULT_CONFIG_TEMPLATE.getBytes(StandardCharsets.UTF_8));
     }
 
-    private static void printJsonError(String text, JSONException e) {
-        String msg = e.getMessage() == null ? "" : e.getMessage();
-        System.err.println("[CONFIG] JSON parse error: " + msg);
-
-        // org.json выдаёт "... at N [character C line L]"
-        int idx = -1;
-        try {
-            java.util.regex.Matcher m = java.util.regex.Pattern
-                    .compile("at (\\d+)").matcher(msg);
-            if (m.find()) idx = Integer.parseInt(m.group(1));
-        } catch (Exception ignored) {}
-        if (idx < 0) return;
-
-        int from = Math.max(0, idx - 40);
-        int to   = Math.min(text.length(), idx + 40);
-        if (from < to) {
-            System.err.println("[CONFIG] context: ..."
-                    + text.substring(from, to).replace("\n", "\\n")
-                    + "...");
-        }
-    }
-
+    // ============================================================
+    //  Парсинг
+    // ============================================================
     private void parseFromJson(JSONObject obj) {
-        port              = obj.optInt("port", DEFAULT_PORT);
-        watchdogTimeoutMs = obj.optLong("watchdogTimeoutMs", watchdogTimeoutMs);
-        maxFileBytes      = obj.optLong("maxFileBytes", maxFileBytes);
-        maxTotalBytes     = obj.optLong("maxTotalBytes", maxTotalBytes);
-        consoleWidth      = obj.optInt("consoleWidth", consoleWidth);
-        debug             = obj.optBoolean("debug", debug);
-        modelName         = obj.optString("modelName", modelName);
-        deepseekUrl       = obj.optString("deepseekUrl", deepseekUrl);
-        mailClientUrl     = obj.optString("mailClientUrl", "");
-        mailAdminUrl      = obj.optString("mailAdminUrl", "");
-        extensionDir      = obj.optString("extensionDir", "");
+        this.port              = obj.optInt("port", DEFAULT_PORT);
+        this.watchdogTimeoutMs = obj.optLong("watchdogTimeoutMs", 120_000L);
+        this.maxFileBytes      = obj.optLong("maxFileBytes", 20L * 1024 * 1024);
+        this.maxTotalBytes     = obj.optLong("maxTotalBytes", 50L * 1024 * 1024);
+        this.consoleWidth      = obj.optInt("consoleWidth", 120);
+        this.debug             = obj.optBoolean("debug", false);
+        this.modelName         = obj.optString("modelName", "DeepSeekCloud");
+        this.deepseekUrl       = obj.optString("deepseekUrl", "https://chat.deepseek.com/");
+        this.mailClientUrl     = obj.optString("mailClientUrl", "");
+        this.mailAdminUrl      = obj.optString("mailAdminUrl", "");
 
-        chromePathWindows = obj.optString("chromePathWindows", "");
-        chromePathLinux   = obj.optString("chromePathLinux", "");
+        // extensionDir: null или строка
+        if (obj.isNull("extensionDir") || !obj.has("extensionDir")) {
+            this.extensionDir = "";
+        } else {
+            this.extensionDir = obj.optString("extensionDir", "");
+        }
 
+        this.chromePathWindows = obj.optString("chromePathWindows", "");
+        this.chromePathLinux   = obj.optString("chromePathLinux",   "");
+        this.hideAddressBar    = obj.optBoolean("hideAddressBar", false);   // ← НОВОЕ
+
+        // browsers: массив строк или объектов {"userDataDir": "..."}
         List<BrowserConfig> list = new ArrayList<>();
         JSONArray arr = obj.optJSONArray("browsers");
         if (arr != null) {
             for (int i = 0; i < arr.length(); i++) {
                 Object o = arr.opt(i);
+                if (o == null) continue;
                 if (o instanceof String) {
-                    list.add(new BrowserConfig((String) o));
+                    String s = ((String) o).trim();
+                    if (!s.isEmpty()) list.add(new BrowserConfig(s));
                 } else if (o instanceof JSONObject) {
-                    JSONObject jo = (JSONObject) o;
-                    String dir    = jo.optString("userDataDir", "");
+                    JSONObject b = (JSONObject) o;
+                    String dir = b.optString("userDataDir", "").trim();
                     if (!dir.isEmpty()) list.add(new BrowserConfig(dir));
                 }
             }
         }
-        browsers = Collections.unmodifiableList(list);
+        this.browsers = list.isEmpty() ? Collections.emptyList() : list;
     }
 
     // ============================================================
@@ -362,18 +385,18 @@ public final class Config {
 
     public String  getChromePathWindows() { return chromePathWindows; }
     public String  getChromePathLinux()   { return chromePathLinux; }
+    public boolean isHideAddressBar()     { return hideAddressBar; }   // ← НОВОЕ
 
-    public List<BrowserConfig> getBrowsers() { return browsers; }
-
-    /** Путь к Chrome для текущей ОС; пустая строка — путь не задан. */
+    /** Путь к браузеру для текущей ОС (Windows/Linux). */
     public String getChromePath() {
         String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
-        if (os.contains("win")) {
-            return chromePathWindows == null ? "" : chromePathWindows.trim();
-        }
-        if (os.contains("nux") || os.contains("nix") || os.contains("aix")) {
-            return chromePathLinux == null ? "" : chromePathLinux.trim();
-        }
+        if (os.contains("win")) return chromePathWindows;
+        if (os.contains("nux") || os.contains("nix") || os.contains("aix"))
+            return chromePathLinux;
+        // macOS (и прочие) — используем windows-путь как безопасный дефолт?
+        // Реально ChromeLauncher сам делает auto-detect, если путь пуст.
         return "";
     }
+
+    public List<BrowserConfig> getBrowsers() { return browsers; }
 }
