@@ -9,7 +9,7 @@
 <body>
 
 <!-- ======================= ЭКРАН ПОДКЛЮЧЕНИЯ ======================= -->
-<div id="connect-screen" class="screen">
+<div id="connect-screen" class="screen hidden">
     <div class="connect-card">
         <div class="connect-logo">🌉</div>
         <h1>DeepSeek Bridge</h1>
@@ -70,6 +70,7 @@
                 <span class="status-dot"></span>
                 <span class="status-text">Подключено</span>
             </div>
+            <button id="change-server-btn" class="btn-icon btn-icon-sm" title="Сменить сервер" style="float: right; margin-top: -24px;">⚙</button>
         </div>
     </aside>
 
@@ -83,12 +84,9 @@
             <button id="new-chat-btn-top" class="btn-header" title="Новый чат">＋ Новый чат</button>
         </header>
 
-        <div class="messages" id="messages">
-            <div class="empty-state" id="empty-state">
-                <div class="empty-icon">💬</div>
-                <div class="empty-title">Начните диалог</div>
-                <div class="empty-sub">Отправьте сообщение, чтобы DeepSeek ответил</div>
-            </div>
+        <!-- Контейнер для сообщений текущей вкладки -->
+        <div id="messages-container">
+            <!-- Сюда JS будет вставлять блоки .messages -->
         </div>
 
         <footer class="composer">

@@ -1,8 +1,3 @@
-/**
- * Клиент bridge API.
- * Оборачивает все запросы к серверу: /api/command, /api/chat, /tabs.
- * Возвращает промисы, бросает Error при ok:false.
- */
 (function () {
   "use strict";
 
@@ -11,7 +6,6 @@
       this.baseUrl = (baseUrl || "").replace(/\/+$/, "");
     }
 
-    // ---------- низкоуровневый fetch с JSON ----------
     async _json(method, path, body) {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(new Error("request timeout")), 130000);
@@ -35,21 +29,18 @@
       }
     }
 
-    // ---------- высокоуровневый cmd ----------
     async cmd(type, extra = {}, opts = {}) {
       const data = await this._json("POST", "/api/command", { type, ...extra });
       if (!data.ok) throw new Error(data.error || "unknown error");
       return data.result;
     }
 
-    // ---------- проверка живости ----------
     async ping() {
       const resp = await fetch(this.baseUrl + "/", { method: "GET" });
       if (!resp.ok) throw new Error("server ping failed: HTTP " + resp.status);
       return true;
     }
 
-    // ---------- вкладки ----------
     async tabs() {
       const result = await this.cmd("tabs");
       return Array.isArray(result.tabs) ? result.tabs : [];
@@ -63,7 +54,6 @@
       return this.cmd("state");
     }
 
-    // ---------- режимы ----------
     async setThinking(on) {
       return this.cmd(on ? "enableThinking" : "disableThinking");
     }
@@ -71,17 +61,15 @@
       return this.cmd(on ? "enableSmartSearch" : "disableSmartSearch");
     }
 
-    // ---------- действия ----------
     async newChat()   { return this.cmd("newChat"); }
     async stop()      { return this.cmd("stopGeneration"); }
     async resume()    { return this.cmd("resumeGeneration"); }
 
-    // ---------- чат: поток через /api/chat ----------
-    chatStream(text, { signal } = {}) {
+    chatStream(messages, { signal } = {}) {
       const url = this.baseUrl + "/api/chat";
       const body = {
         model: "DeepSeekCloud",
-        messages: [{ role: "user", content: text }],
+        messages: messages,
         stream: true,
       };
 
@@ -127,13 +115,17 @@
               if (!line) continue;
               let chunk;
               try { chunk = JSON.parse(line); } catch (_) { continue; }
+
               if (chunk.error) {
                 listeners.error.forEach(fn => fn(new Error(chunk.error)));
                 return;
               }
+
               if (chunk.message && chunk.message.content) {
-                listeners.chunk.forEach(fn => fn(chunk.message.content, "RESPONSE"));
+                // Передаем ТИП в коллбэк (RESPONSE или THINK)
+                listeners.chunk.forEach(fn => fn(chunk.message.content, chunk.type || "RESPONSE"));
               }
+
               if (chunk.done) {
                 listeners.done.forEach(fn => fn());
                 return;
@@ -151,7 +143,7 @@
         abort() { aborted = true; ctrl.abort(); },
         onChunk(fn) { listeners.chunk.push(fn); return this; },
         onDone(fn)  { listeners.done.push(fn);  return this; },
-        onError(fn) { listeners.error.push(fn); return this; },
+        onError(fn) { listeners.error.push(fn); return this; }
       };
     }
   }

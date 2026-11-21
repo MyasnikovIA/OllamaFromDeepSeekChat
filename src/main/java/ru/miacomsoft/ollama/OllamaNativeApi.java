@@ -135,10 +135,10 @@ public final class OllamaNativeApi {
         BridgeCommands.sendChatStream(ui.text, ui.attachments, new StreamListener() {
             @Override
             public void onChunk(String text, String type) {
-                if (!"RESPONSE".equals(type)) return;
                 JSONObject chunk = new JSONObject();
                 chunk.put("model", MODEL_NAME);
                 chunk.put("created_at", nowIso());
+                chunk.put("type", type); // Передаем тип (RESPONSE / THINK)
                 JSONObject msg = new JSONObject();
                 msg.put("role", "assistant");
                 msg.put("content", text);
@@ -211,7 +211,7 @@ public final class OllamaNativeApi {
             BridgeCommands.sendChatStream(ui.text, ui.attachments, new StreamListener() {
                 @Override
                 public void onChunk(String text, String type) {
-                    if (!"RESPONSE".equals(type)) return;
+                    if (!"RESPONSE".equals(type)) return; // generate не поддерживает THINK
                     JSONObject chunk = new JSONObject();
                     chunk.put("model", MODEL_NAME);
                     chunk.put("created_at", nowIso());

@@ -1,8 +1,3 @@
-/**
- * Управление текущим диалогом: отправка, стрим, стоп/продолжить,
- * новый чат (с полной очисткой UI).
- * Работает со ссылками на DOM-узлы, переданными из app.js.
- */
 (function () {
   "use strict";
 
@@ -12,58 +7,68 @@
       this.els = els;
       this.currentStream = null;
       this.busy = false;
-      this.lastUserText = "";
+      this.history = [];
     }
 
-    // ---------- отправка ----------
     async send(text) {
       if (!text || this.busy) return;
       this.busy = true;
-      this.lastUserText = text;
 
-      if (this.els.emptyState) UI.hide(this.els.emptyState);
+      if (this.els.emptyState) {
+        this.els.emptyState.classList.add("hidden");
+      }
 
+      this.history.push({ role: "user", content: text });
       UI.appendMessage(this.els.messages, text, "outgoing", UI.nowTime());
 
       const typing = UI.appendMessage(this.els.messages, "", "incoming", UI.nowTime());
       typing.textContent = "";
       UI.setTyping(typing, true);
 
-      let acc = "";
+      let accResponse = "";
+      let accThought = "";
+      let thoughtEl = null;
 
-      const stream = this.api.chatStream(text);
+      const stream = this.api.chatStream(this.history);
       this.currentStream = stream;
 
       this._updateStopBtn(true);
 
-      stream.onChunk((piece) => {
-        acc += piece;
-        UI.updateTypingText(typing, acc);
-        UI.setTyping(typing, true);
+      stream.onChunk((piece, type) => {
+        if (type === "THINK") {
+          accThought += piece;
+          if (!thoughtEl) {
+            thoughtEl = UI.appendMessage(this.els.messages, "", "thought", "");
+            thoughtEl.textContent = "";
+            // Вставляем блок размышлений ПЕРЕД текущим ответом
+            this.els.messages.insertBefore(thoughtEl.parentNode, typing.parentNode);
+          }
+          UI.updateTypingText(thoughtEl, accThought);
+        } else {
+          accResponse += piece;
+          UI.updateTypingText(typing, accResponse);
+          UI.setTyping(typing, true);
+        }
         this.els.messages.scrollTop = this.els.messages.scrollHeight;
       });
 
       stream.onDone(() => {
         UI.setTyping(typing, false);
-        if (!acc) {
-          UI.updateTypingText(typing, "(пустой ответ)");
-        }
+        if (!accResponse) UI.updateTypingText(typing, "(пустой ответ)");
+        this.history.push({ role: "assistant", content: accResponse });
         this._finish();
       });
 
       stream.onError((err) => {
         UI.setTyping(typing, false);
-        if (!acc) typing.remove();
-        UI.appendMessage(
-          this.els.messages,
-          "Ошибка: " + (err.message || err),
-          "error"
-        );
+        if (!accResponse && !accThought) {
+            typing.parentNode.remove(); // Удаляем пустой пузырь
+        }
+        UI.appendMessage(this.els.messages, "Ошибка: " + (err.message || err), "error");
         this._finish();
       });
     }
 
-    // ---------- стоп ----------
     async stop() {
       try {
         await this.api.stop();
@@ -73,7 +78,6 @@
       }
     }
 
-    // ---------- продолжить ----------
     async resume() {
       try {
         await this.api.resume();
@@ -83,12 +87,9 @@
       }
     }
 
-    // ---------- новый чат (полная очистка UI) ----------
     async newChat() {
       try {
         await this.api.newChat();
-
-        // прервать текущий стрим, если был
         if (this.currentStream) {
           try { this.currentStream.abort(); } catch (_) {}
           this.currentStream = null;
@@ -96,10 +97,9 @@
         this.busy = false;
         this._updateStopBtn(false);
 
-        // очистить сообщения
+        this.history = [];
         this.els.messages.innerHTML = "";
 
-        // пересоздать пустое состояние
         const el = document.createElement("div");
         el.className = "empty-state";
         el.innerHTML =
@@ -109,13 +109,10 @@
         this.els.messages.appendChild(el);
         this.els.emptyState = el;
 
-        // очистить composer
         if (this.els.composer) {
           this.els.composer.value = "";
           this.els.composer.style.height = "auto";
         }
-
-        UI.appendMessage(this.els.messages, "🆕 Новый чат", "system");
       } catch (e) {
         UI.appendMessage(this.els.messages, "Новый чат: " + e.message, "error");
       }

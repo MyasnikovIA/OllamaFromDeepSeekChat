@@ -1,43 +1,55 @@
-/**
- * UI-хелперы: работа с DOM, отрисовка вкладок, режимов,
- * сообщений в стиле WhatsApp.
- */
 (function () {
   "use strict";
 
   const UI = {
-    // ---------- DOM ----------
     $: (sel, root = document) => root.querySelector(sel),
     $$: (sel, root = document) => Array.from(root.querySelectorAll(sel)),
 
     show(el) { if (el) el.classList.remove("hidden"); },
     hide(el) { if (el) el.classList.add("hidden"); },
 
-    // ---------- сообщения ----------
     appendMessage(container, text, kind, meta) {
+      const row = document.createElement("div");
+      row.className = "message-row " + kind;
+
       const el = document.createElement("div");
       el.className = "message " + kind;
+
+      // Если это размышление — добавляем класс
+      if (kind === "thought") {
+          el.classList.add("thought");
+      }
+
       el.innerHTML = this.formatMessageText(text);
+
+      // Кнопка копирования
+      const copyBtn = document.createElement("button");
+      copyBtn.className = "copy-btn";
+      copyBtn.innerHTML = "📋";
+      copyBtn.title = "Копировать";
+      copyBtn.onclick = () => {
+          navigator.clipboard.writeText(text);
+          copyBtn.innerHTML = "✅";
+          setTimeout(() => copyBtn.innerHTML = "📋", 1500);
+      };
+      el.appendChild(copyBtn);
+
       if (meta) {
         const m = document.createElement("span");
         m.className = "msg-meta";
         m.textContent = meta;
         el.appendChild(m);
       }
-      container.appendChild(el);
+
+      row.appendChild(el);
+      container.appendChild(row);
       container.scrollTop = container.scrollHeight;
       return el;
     },
 
-    /**
-     * Очень лёгкий форматтер: `code`, ```blocks```, переносы строк.
-     * Никакого HTML из пользовательского текста не пропускаем —
-     * сначала escape, потом разметка.
-     */
     formatMessageText(text) {
       const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-      // Сначала вытащим ```...``` блоки во временные плейсхолдеры
       const blocks = [];
       let s = String(text).replace(/```([\s\S]*?)```/g, (_, code) => {
         blocks.push(code);
@@ -45,11 +57,7 @@
       });
 
       s = esc(s);
-
-      // инлайн-код
       s = s.replace(/`([^`\n]+)`/g, (_, c) => '<span class="msg-inline-code">' + c + "</span>");
-
-      // вернуть блоки как <pre>
       s = s.replace(/\u0000B(\d+)\u0000/g, (_, i) => {
         return '<span class="msg-code">' + esc(blocks[Number(i)]) + "</span>";
       });
@@ -64,10 +72,11 @@
 
     updateTypingText(el, text) {
       if (!el) return;
-      // сохраняем meta, если есть
       const meta = el.querySelector(".msg-meta");
+      const copy = el.querySelector(".copy-btn");
       el.innerHTML = this.formatMessageText(text);
       if (meta) el.appendChild(meta);
+      if (copy) el.appendChild(copy);
     },
 
     nowTime() {
@@ -75,7 +84,6 @@
       return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     },
 
-    // ---------- вкладки ----------
     renderTabs(listEl, tabs, activeTabId, onSelect) {
       listEl.innerHTML = "";
       if (!tabs || tabs.length === 0) {
@@ -139,7 +147,6 @@
       if (t) t.textContent = text;
     },
 
-    // ---------- режимы ----------
     setModeCheckboxes(thinkEl, searchEl, { thinking, smartSearch }) {
       if (thinkEl)  thinkEl.checked  = !!thinking;
       if (searchEl) searchEl.checked = !!smartSearch;
