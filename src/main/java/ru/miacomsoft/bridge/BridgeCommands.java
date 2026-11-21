@@ -3,6 +3,7 @@ package ru.miacomsoft.bridge;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import ru.miacomsoft.ChromeLauncher;
+import ru.miacomsoft.config.Config;
 
 import java.io.File;
 import java.nio.file.Files;
@@ -63,19 +64,6 @@ public final class BridgeCommands {
         CommandDispatcher.enqueue(new PendingCommand(cmd.toString(), null, true, true));
     }
 
-    // ============================================================
-    //  НОВОЕ: стоп / продолжить
-    //
-    //  Эти команды идут через sendFireAndForget — они не должны
-    //  блокироваться текущим awaitingResponse, иначе ими нельзя
-    //  было бы прервать уже идущую генерацию.
-    //
-    //  Завершение остановленного стрима приходит как обычный
-    //  stream-done (DeepSeek закрывает fetch по клику на «Стоп»),
-    //  что штатно снимает awaitingResponse. Watchdog остаётся
-    //  fallback'ом на случай, если по какой-то причине stream-done
-    //  не пришёл (120 сек).
-    // ============================================================
     public static void sendStopFromStdin() {
         JSONObject cmd = new JSONObject();
         cmd.put("type", "stopGeneration");
@@ -88,9 +76,6 @@ public final class BridgeCommands {
         sendFireAndForget(cmd.toString(), null);
     }
 
-    // ============================================================
-    //  sendFileFromStdin
-    // ============================================================
     public static void sendFileFromStdin(String path, String text) {
         ConsoleWriter cw = ConsoleWriter.get();
         File f = new File(path);
@@ -102,8 +87,7 @@ public final class BridgeCommands {
         }
         if (f.length() > BridgeConstants.MAX_FILE_BYTES) {
             cw.ensureNewline();
-            System.out.println("[!] file too large: " + f.length()
-                    + " bytes (max " + BridgeConstants.MAX_FILE_BYTES + ")");
+            System.out.println("[!] file too large: " + f.length() + " bytes (max " + BridgeConstants.MAX_FILE_BYTES + ")");
             System.out.print("> "); System.out.flush();
             return;
         }
@@ -125,9 +109,7 @@ public final class BridgeCommands {
             cmd.put("files", arr);
 
             cw.ensureNewline();
-            System.out.println("[FILE] " + f.getName()
-                    + " (" + bytes.length + " bytes, " + mime + ")"
-                    + (text != null && !text.isEmpty() ? " → " + text : ""));
+            System.out.println("[FILE] " + f.getName() + " (" + bytes.length + " bytes, " + mime + ")" + (text != null && !text.isEmpty() ? " → " + text : ""));
             System.out.print("> "); System.out.flush();
 
             CommandDispatcher.enqueue(new PendingCommand(cmd.toString(), null, true, true));
@@ -168,27 +150,16 @@ public final class BridgeCommands {
             for (Attachment a : attachments) {
                 long bin = a.dataBase64 == null ? 0 : (a.dataBase64.length() * 3L) / 4L;
                 if (bin > BridgeConstants.MAX_FILE_BYTES) {
-                    if (listener != null) {
-                        listener.onError("file too large: " + a.name
-                                + " (" + bin + " > " + BridgeConstants.MAX_FILE_BYTES + ")");
-                    } else {
-                        ConsoleWriter.get().ensureNewline();
-                        System.out.println("[!] file too large: " + a.name);
-                        System.out.print("> "); System.out.flush();
-                    }
+                    if (listener != null) listener.onError("file too large: " + a.name + " (" + bin + " > " + BridgeConstants.MAX_FILE_BYTES + ")");
+                    else { ConsoleWriter.get().ensureNewline(); System.out.println("[!] file too large: " + a.name); System.out.print("> "); System.out.flush(); }
                     return;
                 }
                 totalB64 += a.dataBase64 == null ? 0 : a.dataBase64.length();
             }
             long totalBin = (totalB64 * 3L) / 4L;
             if (totalBin > BridgeConstants.MAX_TOTAL_BYTES) {
-                if (listener != null) {
-                    listener.onError("attachments total size exceeds " + BridgeConstants.MAX_TOTAL_BYTES);
-                } else {
-                    ConsoleWriter.get().ensureNewline();
-                    System.out.println("[!] attachments total too large");
-                    System.out.print("> "); System.out.flush();
-                }
+                if (listener != null) listener.onError("attachments total size exceeds " + BridgeConstants.MAX_TOTAL_BYTES);
+                else { ConsoleWriter.get().ensureNewline(); System.out.println("[!] attachments total too large"); System.out.print("> "); System.out.flush(); }
                 return;
             }
         }
@@ -214,9 +185,7 @@ public final class BridgeCommands {
     //  tab management API (stdin)
     // ============================================================
     public static void openNewTabFromStdin(String url) {
-        String target = (url == null || url.trim().isEmpty())
-                ? "https://chat.deepseek.com/"
-                : url.trim();
+        String target = (url == null || url.trim().isEmpty()) ? "https://chat.deepseek.com/" : url.trim();
         JSONObject cmd = new JSONObject();
         cmd.put("type", "openTab");
         cmd.put("url", target);
@@ -241,6 +210,31 @@ public final class BridgeCommands {
         JSONObject cmd = new JSONObject();
         cmd.put("type", "closeAllTabs");
         sendFireAndForget(cmd.toString(), null);
+    }
+
+    // ============================================================
+    //  NEW: запуск браузера по индексу из списка Config.get().getBrowsers()
+    // ============================================================
+    public static void launchBrowserFromStdin(int index) {
+        Config cfg = Config.get();
+        List<ru.miacomsoft.config.BrowserConfig> browsers = cfg.getBrowsers();
+
+        if (browsers == null || index < 0 || index >= browsers.size()) {
+            ConsoleWriter.get().ensureNewline();
+            System.out.println("[!] Invalid browser index: " + index + " (total: " + (browsers == null ? 0 : browsers.size()) + ")");
+            System.out.print("> "); System.out.flush();
+            return;
+        }
+
+        ru.miacomsoft.config.BrowserConfig bc = browsers.get(index);
+        ConsoleWriter.get().ensureNewline();
+        System.out.println("[CHROME] Launching browser #" + index + ": " + bc.displayName());
+        System.out.print("> "); System.out.flush();
+
+        // Запускаем в отдельном потоке, чтобы не блокировать консоль
+        new Thread(() -> {
+            ChromeLauncher.launchNewWindow(cfg.getDeepseekUrl(), bc);
+        }).start();
     }
 
     static void sendFireAndForget(String json, String fallbackUrlForLaunch) {

@@ -50,6 +50,15 @@
       return this.cmd("tab", { tabId });
     }
 
+    async browsers() {
+      const result = await this.cmd("browsers");
+      return Array.isArray(result.browsers) ? result.browsers : [];
+    }
+
+    async openBrowser(index) {
+      return this.cmd("openBrowser", { index });
+    }
+
     async state() {
       return this.cmd("state");
     }

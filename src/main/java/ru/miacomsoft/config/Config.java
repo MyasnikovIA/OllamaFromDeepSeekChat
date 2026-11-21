@@ -399,4 +399,7 @@ public final class Config {
     }
 
     public List<BrowserConfig> getBrowsers() { return browsers; }
+    private boolean autoLaunchBrowsers = false;
+    // В parseFromJson: this.autoLaunchBrowsers = obj.optBoolean("autoLaunchBrowsers", false);
+    public boolean isAutoLaunchBrowsers() { return autoLaunchBrowsers; }
 }

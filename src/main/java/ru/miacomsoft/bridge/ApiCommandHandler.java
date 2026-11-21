@@ -3,11 +3,14 @@ package ru.miacomsoft.bridge;
 import com.sun.net.httpserver.HttpExchange;
 import org.json.JSONArray;
 import org.json.JSONObject;
+import ru.miacomsoft.config.BrowserConfig;
+import ru.miacomsoft.config.Config;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -25,7 +28,7 @@ import java.util.concurrent.TimeUnit;
  *   enableSmartSearch, disableSmartSearch,
  *   stopGeneration, resumeGeneration,
  *   openTab, closeTab, closeAllTabs,
- *   tabs, state, tab, file, help
+ *   tabs, state, tab, file, help, browsers, openBrowser
  */
 public final class ApiCommandHandler {
 
@@ -146,14 +149,12 @@ public final class ApiCommandHandler {
             }
             case "tabs": {
                 echo("/tabs");
-                // printTabs сам печатает [TABS] … + "> "
                 TabRegistry.printTabs();
                 writeJson(ex, 200, okObj(TabRegistry.toJson()));
                 return;
             }
             case "state": {
                 echo("/state");
-                // printState сам печатает [STATE] … + "> "
                 TabRegistry.printState();
                 JSONObject resp = new JSONObject();
                 BrowserTab c = TabRegistry.pickActiveForDispatch();
@@ -187,6 +188,38 @@ public final class ApiCommandHandler {
                 writeJson(ex, 200, okObj(new JSONObject().put("selected", ok).put("tabId", target)));
                 return;
             }
+            case "browsers": {
+                echo("/browsers");
+                Config cfg = Config.get();
+                List<BrowserConfig> list = cfg.getBrowsers();
+                JSONArray arr = new JSONArray();
+                if (list != null) {
+                    for (int i = 0; i < list.size(); i++) {
+                        JSONObject b = new JSONObject();
+                        b.put("index", i);
+                        b.put("userDataDir", list.get(i).userDataDir);
+                        b.put("displayName", list.get(i).displayName());
+                        b.put("valid", list.get(i).isValid());
+                        arr.put(b);
+                    }
+                }
+                JSONObject resp = new JSONObject();
+                resp.put("count", arr.length());
+                resp.put("browsers", arr);
+                writeJson(ex, 200, okObj(resp));
+                return;
+            }
+            case "openBrowser": {
+                int index = req.optInt("index", -1);
+                if (index < 0) {
+                    writeJson(ex, 400, errorObj("missing or invalid 'index'"));
+                    return;
+                }
+                echo("/openbrowser " + index);
+                BridgeCommands.launchBrowserFromStdin(index);
+                writeJson(ex, 200, okObj(new JSONObject().put("queued", true).put("index", index)));
+                return;
+            }
             case "help": {
                 echo("/help");
                 JSONObject help = new JSONObject();
@@ -205,10 +238,11 @@ public final class ApiCommandHandler {
                 cmds.put("state    → {type:\"state\"}");
                 cmds.put("tab      → {type:\"tab\", tabId:\"#n|id|prefix\"}");
                 cmds.put("file     → {type:\"file\", path:\"...\", text?}");
+                cmds.put("browsers → {type:\"browsers\"}");
+                cmds.put("openBrws → {type:\"openBrowser\", index:0}");
                 help.put("endpoints", new JSONArray()
                         .put("POST /api/command")
                         .put("GET  /tabs")
-                        .put("GET  /api/ajax")
                         .put("POST /api/ajax"));
                 help.put("commands", cmds);
                 writeJson(ex, 200, okObj(help));

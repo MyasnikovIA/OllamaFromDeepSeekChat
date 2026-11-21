@@ -204,6 +204,13 @@ input, textarea { font-family: inherit; }
   display: flex; align-items: center; gap: 10px; padding: 10px 20px;
   cursor: pointer; transition: background .12s; border-left: 3px solid transparent;
 }
+.tab-item.browser-item {
+  cursor: pointer;
+  transition: background .1s;
+}
+.tab-item.browser-item:hover {
+  background: #e9edef;
+}
 .tab-item:hover { background: var(--bg-hover); }
 .tab-item.active { background: var(--bg-active); border-left-color: var(--green); }
 

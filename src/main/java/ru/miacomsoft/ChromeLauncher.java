@@ -17,26 +17,18 @@ public final class ChromeLauncher {
 
     public static OS detectOS() {
         String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
-        if (os.contains("win"))                  return OS.WINDOWS;
+        if (os.contains("win")) return OS.WINDOWS;
         if (os.contains("mac") || os.contains("darwin")) return OS.MACOS;
-        if (os.contains("nux") || os.contains("nix") || os.contains("aix"))
-            return OS.LINUX;
+        if (os.contains("nux") || os.contains("nix") || os.contains("aix")) return OS.LINUX;
         return OS.UNKNOWN;
     }
 
-    // ============================================================
-    //  Public API
-    // ============================================================
+    /**
+     * Запускает ВСЕ браузеры из конфига (используется при старте, если включено autoLaunchBrowsers).
+     */
     public static void openDeepSeek() {
         OS os = detectOS();
         System.out.println("[CHROME] OS detected: " + os);
-
-        String configured = Config.get().getChromePath();
-        if (!configured.isEmpty()) {
-            System.out.println("[CHROME] configured path: " + configured);
-        } else {
-            System.out.println("[CHROME] configured path: (empty → auto-detect / default browser)");
-        }
 
         Config cfg = Config.get();
         List<BrowserConfig> browsers = cfg.getBrowsers();
@@ -50,7 +42,7 @@ public final class ChromeLauncher {
             }
         }
 
-        // ---- popup-окна почты (в обычном режиме, с адресной строкой) ----
+        // popup-окна почты
         if (isNonEmpty(cfg.getMailClientUrl())) {
             launchPopupUrl(cfg.getMailClientUrl(), os);
         }
@@ -59,13 +51,33 @@ public final class ChromeLauncher {
         }
     }
 
-    /** Открыть ещё одно окно DeepSeek (из /opentab при отсутствии активной вкладки). */
-    public static void launchNewWindow(String url) {
-        String target = (url == null || url.trim().isEmpty())
-                ? Config.get().getDeepseekUrl()
-                : url.trim();
-        OS os = detectOS();
+    /**
+     * NEW: Запускает браузер по конкретному индексу из массива browsers в config.json.
+     * Полезно для ручного запуска без открытия всех окон сразу.
+     */
+    public static void launchBrowserAtIndex(int index) {
+        Config cfg = Config.get();
+        List<BrowserConfig> browsers = cfg.getBrowsers();
 
+        if (browsers == null || index < 0 || index >= browsers.size()) {
+            System.err.println("[CHROME] Invalid browser index: " + index + " (total: " + (browsers == null ? 0 : browsers.size()) + ")");
+            return;
+        }
+
+        BrowserConfig bc = browsers.get(index);
+        OS os = detectOS();
+        String url = cfg.getDeepseekUrl();
+
+        System.out.println("[CHROME] Launching browser #" + index + ": " + bc.displayName());
+        launchBrowser(bc, os, url);
+    }
+
+    /**
+     * Запустить браузер с профилем по умолчанию (если передан только url).
+     */
+    public static void launchNewWindow(String url) {
+        String target = (url == null || url.trim().isEmpty()) ? Config.get().getDeepseekUrl() : url.trim();
+        OS os = detectOS();
         List<BrowserConfig> browsers = Config.get().getBrowsers();
         if (browsers != null && !browsers.isEmpty()) {
             for (BrowserConfig bc : browsers) {
@@ -78,10 +90,21 @@ public final class ChromeLauncher {
         fallbackAutoLaunch(os, target);
     }
 
+    /**
+     * Запустить браузер с конкретным профилем.
+     */
+    public static void launchNewWindow(String url, BrowserConfig bc) {
+        String target = (url == null || url.trim().isEmpty()) ? Config.get().getDeepseekUrl() : url.trim();
+        OS os = detectOS();
+        if (bc != null && bc.isValid()) {
+            launchBrowser(bc, os, target);
+        } else {
+            launchNewWindow(target);
+        }
+    }
+
     // ============================================================
     //  DeepSeek-окно одного профиля (--user-data-dir).
-    //  Режим отображения адресной строки управляется
-    //  Config.get().isHideAddressBar().
     // ============================================================
     static void launchBrowser(BrowserConfig bc, OS os, String url) {
         if (!bc.isValid()) {
@@ -101,9 +124,9 @@ public final class ChromeLauncher {
         args.add("--no-default-browser-check");
 
         if (Config.get().isHideAddressBar()) {
-            args.add("--app=" + url);      // режим приложения (без адресной строки)
+            args.add("--app=" + url);
         } else {
-            args.add(url);                 // обычное окно (с адресной строкой)
+            args.add(url);
         }
 
         if (bc.userDataDir != null && !bc.userDataDir.isEmpty()) {
@@ -111,14 +134,11 @@ public final class ChromeLauncher {
         }
 
         appendExtensionArg(args);
-
         launch(exe, args, os, "[" + bc.displayName() + "] " + url);
     }
 
     // ============================================================
     //  Fallback: один экземпляр в профиле по умолчанию.
-    //  Режим отображения адресной строки управляется
-    //  Config.get().isHideAddressBar().
     // ============================================================
     static void fallbackAutoLaunch(OS os, String url) {
         String chrome = pickExecutable(os);
@@ -133,9 +153,9 @@ public final class ChromeLauncher {
         args.add("--no-default-browser-check");
 
         if (Config.get().isHideAddressBar()) {
-            args.add("--app=" + url);      // режим приложения (без адресной строки)
+            args.add("--app=" + url);
         } else {
-            args.add(url);                 // обычное окно (с адресной строкой)
+            args.add(url);
         }
 
         String profileDir = System.getProperty("ds.profile.dir");
@@ -144,15 +164,11 @@ public final class ChromeLauncher {
         }
 
         appendExtensionArg(args);
-
         launch(chrome, args, os, "[auto] " + url);
     }
 
     // ============================================================
     //  Popup-окно почты — ОБЫЧНЫЙ режим (с адресной строкой).
-    //  Браузер берётся из Config.getChromePath().
-    //  Никакого --app= и никакого --user-data-dir —
-    //  используется профиль по умолчанию запущенного браузера.
     // ============================================================
     static void launchPopupUrl(String url, OS os) {
         String exe = pickExecutable(os);
@@ -165,7 +181,6 @@ public final class ChromeLauncher {
         List<String> args = new ArrayList<>();
         args.add("--no-first-run");
         args.add("--no-default-browser-check");
-        // Обычный режим: открываем URL как есть.
         args.add(url);
 
         launch(exe, args, os, "[mail] " + url);
@@ -173,8 +188,6 @@ public final class ChromeLauncher {
 
     // ============================================================
     //  Выбор исполняемого файла
-    //  1) Если в config задан chromePath для текущей ОС — используем его.
-    //  2) Иначе — авто-поиск Chrome.
     // ============================================================
     static String pickExecutable(OS os) {
         String configured = Config.get().getChromePath();
@@ -187,7 +200,6 @@ public final class ChromeLauncher {
         return findChromeExecutable(os);
     }
 
-    /** Добавляет --load-extension= если extensionDir задан (property → config). */
     static void appendExtensionArg(List<String> args) {
         String extDir = System.getProperty("ds.extension.dir");
         if (extDir == null) extDir = Config.get().getExtensionDir();
@@ -201,9 +213,6 @@ public final class ChromeLauncher {
         }
     }
 
-    // ============================================================
-    //  OS-specific launch
-    // ============================================================
     static void launch(String exe, List<String> args, OS os, String label) {
         List<String> cmd = buildLaunchCommand(exe, args, os);
         System.out.println("[CHROME] launching " + label);
@@ -302,7 +311,6 @@ public final class ChromeLauncher {
         return null;
     }
 
-    /** Аналог `which` — поиск в PATH. */
     static String which(String name) {
         String path = System.getenv("PATH");
         if (path == null) return null;
@@ -315,9 +323,6 @@ public final class ChromeLauncher {
         return null;
     }
 
-    // ============================================================
-    //  Fallback: открыть URL системным браузером
-    // ============================================================
     static void openDefaultBrowser(OS os, String url) {
         try {
             switch (os) {

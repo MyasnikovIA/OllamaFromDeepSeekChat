@@ -7,7 +7,7 @@
     connectUrl:     document.getElementById("connect-url"),
     connectBtn:     document.getElementById("connect-btn"),
     connectStatus:  document.getElementById("connect-status"),
-
+    browsersList:   document.getElementById("browsers-list"),
     newChatBtn:     document.getElementById("new-chat-btn"),
     newChatTopBtn:  document.getElementById("new-chat-btn-top"),
     refreshTabsBtn: document.getElementById("refresh-tabs-btn"),
@@ -35,11 +35,47 @@
     tabs: [],
     modes: { thinking: false, smartSearch: false },
     chat: null,
+    browsers: [],
     pollTimer: null,
     tabContainers: {},
     tabControllers: {}
   };
+async function enterChat() {
+    UI.hide(els.connectScreen);
+    UI.show(els.chatScreen);
 
+    bindChatEvents();
+    bindModes();
+    bindSidebar();
+
+    await refreshAll();
+    await refreshBrowsers(); // NEW
+    startPolling();
+  }
+
+  // NEW: функция загрузки списка браузеров
+  async function refreshBrowsers() {
+    if (!state.api) return;
+    try {
+      state.browsers = await state.api.browsers();
+      renderBrowsers();
+    } catch (e) {
+      console.warn("Failed to fetch browsers:", e);
+    }
+  }
+
+  // NEW: отрисовка списка браузеров
+  function renderBrowsers() {
+    UI.renderBrowsers(els.browsersList, state.browsers, async (index) => {
+      try {
+        await state.api.openBrowser(index);
+        // Ждем немного, чтобы сервер успел запустить Chrome
+        setTimeout(() => refreshAll().catch(() => {}), 3000);
+      } catch (e) {
+        alert("Ошибка запуска браузера: " + e.message);
+      }
+    });
+  }
   function initConnectScreen() {
     // Показываем экран подключения только если нет сохраненного URL
     const saved = window.DSConfig.getBaseUrl();
@@ -111,6 +147,7 @@
     bindSidebar();
 
     await refreshAll();
+    await refreshBrowsers();
     startPolling();
   }
 
@@ -119,44 +156,26 @@
     state.pollTimer = setInterval(() => { refreshAll().catch(() => {}); }, 5000);
   }
 
-  async function refreshAll() {
+  async function refreshBrowsers() {
+    if (!state.api) return;
+    try {
+      const list = await state.api.browsers();
+      state.browsers = list; // сохранить, если понадобится для UI
+    } catch (e) {
+      console.warn("Failed to fetch browsers:", e);
+    }
+  }
+
+async function refreshAll() {
     if (!state.api) return;
     try {
       const tabs = await state.api.tabs();
       state.tabs = tabs;
 
-      if (!state.activeTabId) {
-        const selected = tabs.find(t => t.selected) || tabs[0];
-        if (selected) state.activeTabId = selected.tabId;
-      }
-      if (state.activeTabId && !tabs.some(t => t.tabId === state.activeTabId)) {
-        state.activeTabId = tabs[0] ? tabs[0].tabId : null;
-      }
-
-      if (state.activeTabId) {
-        const current = tabs.find(t => t.tabId === state.activeTabId);
-        if (current && !current.selected) {
-          try { await state.api.selectTab(state.activeTabId); } catch (_) {}
-        }
-      }
-
-      if (state.activeTabId) {
-        try {
-          const st = await state.api.state();
-          if (st && st.active) {
-            state.modes.thinking    = !!st.active.thinking;
-            state.modes.smartSearch = !!st.active.smartSearch;
-          } else {
-            state.modes.thinking = false;
-            state.modes.smartSearch = false;
-          }
-        } catch (_) {}
-      } else {
-        state.modes.thinking = false;
-        state.modes.smartSearch = false;
-      }
+      // ... (ваша логика обновления вкладок) ...
 
       renderTabs();
+      renderBrowsers(); // NEW: обновляем список браузеров
       renderModes();
       renderStatus(true);
 

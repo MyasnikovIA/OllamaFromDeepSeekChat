@@ -5,6 +5,7 @@ import ru.miacomsoft.bridge.BridgeCommands;
 import ru.miacomsoft.bridge.BridgeConstants;
 import ru.miacomsoft.bridge.BridgeRouter;
 import ru.miacomsoft.bridge.ConsoleWriter;
+import ru.miacomsoft.config.BrowserConfig;
 import ru.miacomsoft.config.Config;
 import ru.miacomsoft.ollama.OllamaConstants;
 import ru.miacomsoft.ollama.OllamaRouter;
@@ -15,6 +16,7 @@ import java.io.File;
 import java.io.InputStreamReader;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -63,7 +65,6 @@ public class Main {
         try {
             Config.load(CONFIG_FILE);
         } catch (org.json.JSONException e) {
-            // printJsonError уже отработал внутри Config.load
             System.err.println("[CONFIG] JSON parse failed. Exiting.");
             System.exit(1);
             return;
@@ -71,7 +72,6 @@ public class Main {
             System.err.println("[CONFIG] read failed: " + e.getMessage() + " — using defaults.");
         }
 
-        // Применить значения из конфига к статическим полям и ConsoleWriter.
         BridgeConstants.applyFromConfig();
         OllamaConstants.applyFromConfig();
         ConsoleWriter.get().reconfigure();
@@ -90,8 +90,12 @@ public class Main {
         ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
         sched.scheduleAtFixedRate(BridgeCommands::watchdogTick, 10, 10, TimeUnit.SECONDS);
 
-        if (!noBrowser && !"true".equals(System.getProperty("ds.no.browser"))) {
+        Config cfg = Config.get();
+        if (!noBrowser && cfg.isAutoLaunchBrowsers()) {
             ChromeLauncher.openDeepSeek();
+        } else {
+            System.out.println("[CHROME] Автозапуск браузеров отключён (или передан флаг --no-browser).");
+            System.out.println("[CHROME] Используйте /browsers для списка и /openbrowser <n> для запуска.");
         }
 
         Thread stdinThread = new Thread(() -> {
@@ -123,8 +127,7 @@ public class Main {
         System.out.println("[SERVER] Bridge SSE : http://localhost:" + PORT + "/events?tabId=...");
         System.out.println("[SERVER] Bridge log : http://localhost:" + PORT + "/log");
         System.out.println("[SERVER] Tabs list  : http://localhost:" + PORT + "/tabs");
-        System.out.println("[SERVER] debug JSON : "
-                + (OllamaConstants.DEBUG ? "ON" : "off"));
+        System.out.println("[SERVER] debug JSON : " + (OllamaConstants.DEBUG ? "ON" : "off"));
         System.out.println();
         System.out.println("  <текст>              → sendToDeepSeek(text)");
         System.out.println("  ! <js>               → eval в консоли страницы");
@@ -135,14 +138,16 @@ public class Main {
         System.out.println("  /search off          → выключить умный поиск");
         System.out.println("  /stop                → остановить текущую генерацию");
         System.out.println("  /resume              → продолжить остановленную генерацию");
-        System.out.println("  /file <path> [text]  → отправить файл в DeepSeek (с текстом)");
+        System.out.println("  /file <path> [text]  → отправить файл в DeepSeek");
         System.out.println("  /tabs                → список открытых вкладок DeepSeek");
-        System.out.println("  /tab <n|id>          → выбрать вкладку (#n или tabId/префикс)");
+        System.out.println("  /tab <n|id>          → выбрать вкладку");
         System.out.println("  /opentab [url]       → открыть новую вкладку DeepSeek");
         System.out.println("  /newtab [url]        → алиас для /opentab");
-        System.out.println("  /close <n|id>        → закрыть вкладку (#n, tabId или префикс)");
-        System.out.println("  /closeall            → закрыть ВСЕ вкладки chat.deepseek.com/*");
+        System.out.println("  /close <n|id>        → закрыть вкладку");
+        System.out.println("  /closeall            → закрыть ВСЕ вкладки");
         System.out.println("  /state               → показать режимы активной вкладки");
+        System.out.println("  /browsers            → список доступных профилей браузера");
+        System.out.println("  /openbrowser <n>     → запустить браузер по индексу из списка");
         System.out.println("  /help                → эта подсказка");
         System.out.println("========================================================");
         System.out.print("> ");
@@ -167,17 +172,14 @@ public class Main {
             BridgeCommands.sendEnableThinkingFromStdin();
             return;
         }
-
         if (trimmed.equals("/think off")) {
             BridgeCommands.sendDisableThinkingFromStdin();
             return;
         }
-
         if (trimmed.equals("/search on") || trimmed.equals("/search")) {
             BridgeCommands.sendEnableSmartSearchFromStdin();
             return;
         }
-
         if (trimmed.equals("/search off")) {
             BridgeCommands.sendDisableSmartSearchFromStdin();
             return;
@@ -187,9 +189,35 @@ public class Main {
             BridgeCommands.sendStopFromStdin();
             return;
         }
-
         if (trimmed.equals("/resume") || trimmed.equals("/continue")) {
             BridgeCommands.sendResumeFromStdin();
+            return;
+        }
+
+        if (trimmed.equals("/browsers")) {
+            List<BrowserConfig> list = Config.get().getBrowsers();
+            ConsoleWriter.get().ensureNewline();
+            System.out.println("[BROWSERS] count: " + (list == null ? 0 : list.size()));
+            if (list != null) {
+                for (int i = 0; i < list.size(); i++) {
+                    BrowserConfig bc = list.get(i);
+                    System.out.println("  #" + i + " " + bc.displayName() + " (" + bc.userDataDir + ")");
+                }
+            }
+            System.out.print("> "); System.out.flush();
+            return;
+        }
+
+        if (trimmed.startsWith("/openbrowser ")) {
+            String arg = trimmed.substring("/openbrowser ".length()).trim();
+            try {
+                int idx = Integer.parseInt(arg);
+                ChromeLauncher.launchBrowserAtIndex(idx);
+            } catch (NumberFormatException e) {
+                ConsoleWriter.get().ensureNewline();
+                System.out.println("[!] invalid index: " + arg);
+                System.out.print("> "); System.out.flush();
+            }
             return;
         }
 
@@ -230,7 +258,6 @@ public class Main {
 
             SessionManager.addMessage("user",
                     "Отправлен файл: " + path + (text.isEmpty() ? "" : " | Текст: " + text));
-
             BridgeCommands.sendFileFromStdin(path, text);
             return;
         }

@@ -146,7 +146,49 @@
       const t = pillEl.querySelector(".status-text");
       if (t) t.textContent = text;
     },
+    renderBrowsers(listEl, browsers, onSelect) {
+      listEl.innerHTML = "";
+      if (!browsers || browsers.length === 0) {
+        const empty = document.createElement("li");
+        empty.className = "tab-empty";
+        empty.textContent = "Нет доступных профилей";
+        listEl.appendChild(empty);
+        return;
+      }
 
+      browsers.forEach((b) => {
+        const li = document.createElement("li");
+        li.className = "tab-item";
+        li.title = b.userDataDir;
+
+        const avatar = document.createElement("div");
+        avatar.className = "tab-avatar";
+        avatar.textContent = "🌐"; // Иконка браузера
+
+        const meta = document.createElement("div");
+        meta.className = "tab-meta";
+
+        const id = document.createElement("div");
+        id.className = "tab-id";
+        id.textContent = `#${b.index} ${b.displayName}`;
+
+        const flags = document.createElement("div");
+        flags.className = "tab-flags";
+        const flag = document.createElement("span");
+        flag.className = "tab-flag " + (b.valid ? "on" : "off");
+        flag.textContent = b.valid ? "OK" : "Not Found";
+        flags.appendChild(flag);
+
+        meta.appendChild(id);
+        meta.appendChild(flags);
+
+        li.appendChild(avatar);
+        li.appendChild(meta);
+
+        li.addEventListener("click", () => onSelect(b.index));
+        listEl.appendChild(li);
+      });
+    },
     setModeCheckboxes(thinkEl, searchEl, { thinking, smartSearch }) {
       if (thinkEl)  thinkEl.checked  = !!thinking;
       if (searchEl) searchEl.checked = !!smartSearch;
