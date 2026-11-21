@@ -212,6 +212,74 @@
     return null;
   }
 
+  // ============================================================
+  //  НОВОЕ: устойчивый поиск поля ввода чата.
+  //
+  //  Приоритеты:
+  //    1) точные placeholder-ы (RU / EN и пара известных вариантов);
+  //    2) любой видимый <textarea> на странице;
+  //    3) contenteditable-элемент ввода (если DeepSeek сменит разметку).
+  //
+  //  Все кандидаты отбрасываются, если элемент невидим
+  //  (offsetParent === null) или его rect нулевого размера —
+  //  это отсекает скрытые/фоновые поля.
+  // ============================================================
+  const KNOWN_PLACEHOLDERS = [
+    "Message DeepSeek",
+    "Сообщение для DeepSeek",
+    "Send a message",
+    "Написать сообщение",
+    "Type a message",
+    "Введите сообщение"
+  ];
+
+  function isVisible(el) {
+    if (!el) return false;
+    if (el.offsetParent === null && el.getClientRects().length === 0) return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  }
+
+  function findChatInputSync() {
+    // 1) точные placeholder-ы (RU/EN/…)
+    for (const ph of KNOWN_PLACEHOLDERS) {
+      const el = document.querySelector(
+          'textarea[placeholder="' + ph.replace(/"/g, '\\"') + '"]'
+      );
+      if (isVisible(el)) return el;
+    }
+
+    // 2) любой textarea[placeholder] (не жёстко по тексту)
+    const byPlaceholder = document.querySelectorAll('textarea[placeholder]');
+    for (const el of byPlaceholder) {
+      if (isVisible(el)) return el;
+    }
+
+    // 3) любой видимый textarea
+    const textareas = document.querySelectorAll('textarea');
+    for (const el of textareas) {
+      if (isVisible(el)) return el;
+    }
+
+    // 4) contenteditable-ввод (на случай смены разметки)
+    const editables = document.querySelectorAll('[contenteditable="true"]');
+    for (const el of editables) {
+      if (isVisible(el)) return el;
+    }
+
+    return null;
+  }
+
+  async function findChatInput(timeout = 10000) {
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+      const el = findChatInputSync();
+      if (el) return el;
+      await sleep(100);
+    }
+    return null;
+  }
+
   function base64ToBlob(b64, mime) {
     const bin = atob(b64 || "");
     const len = bin.length;
@@ -532,7 +600,8 @@
       throw new Error("[DS] no content to send (empty text and no files)");
     }
 
-    const input = await waitForElement('[placeholder="Сообщение для DeepSeek"]', 10000);
+    // ИСПРАВЛЕНО: устойчивый поиск поля ввода (RU / EN / любой textarea).
+    const input = await findChatInput(10000);
     if (!input) throw new Error("[DS] Поле ввода не найдено");
 
     const rect = input.getBoundingClientRect();
@@ -652,7 +721,8 @@
       for (const el of candidates) {
         const spans = el.querySelectorAll("span");
         for (const s of spans) {
-          if ((s.textContent || "").trim() === "Новый чат") {
+          const t = (s.textContent || "").trim();
+          if (t === "Новый чат" || t === "New chat" || /^New chat$/i.test(t)) {
             newChatBtn = el;
             break;
           }
@@ -797,8 +867,8 @@
   window.disableThinking     = disableThinking;
   window.enableSmartSearch   = enableSmartSearch;
   window.disableSmartSearch  = disableSmartSearch;
-  window.stopGeneration      = stopGeneration;    // НОВОЕ
-  window.resumeGeneration    = resumeGeneration;  // НОВОЕ
+  window.stopGeneration      = stopGeneration;
+  window.resumeGeneration    = resumeGeneration;
 
   setupContinueWatcher();
 
@@ -849,7 +919,6 @@
               .catch((e) => emitResult(false, "disableSmartSearch failed: " + (e && e.message || e)));
           return;
 
-        // ---------- НОВОЕ: стоп / продолжить ----------
         case "stopGeneration":
           window.stopGeneration()
               .then(() => emitResult(true, "Генерация остановлена"))
@@ -860,6 +929,15 @@
           window.resumeGeneration()
               .then(() => emitResult(true, "Генерация продолжена"))
               .catch((e) => emitResult(false, "resumeGeneration failed: " + (e && e.message || e)));
+          return;
+
+        // НОВОЕ: getState больше не считается неизвестной командой.
+        // content.js шлёт {type:"getState"} при подключении SSE —
+        // раньше это давало "[!] unknown command type: getState" в консоли
+        // и, что хуже, сбрасывало awaitingResponse в CommandDispatcher.
+        // Сейчас актуальное состояние режимов отправляется отдельно
+        // через EVT_MODE_STATE из content.js.
+        case "getState":
           return;
 
         case "eval": {
