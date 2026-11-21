@@ -56,6 +56,9 @@
         if (!accResponse) UI.updateTypingText(typing, "(пустой ответ)");
         this.history.push({ role: "assistant", content: accResponse });
         this._finish();
+        // Инициализация кнопок копирования кода после завершения стрима
+        UI.initCopyButtons(typing);
+        if (thoughtEl) UI.initCopyButtons(thoughtEl);
       });
 
       stream.onError((err) => {

@@ -18,11 +18,13 @@
 
       el.innerHTML = this.formatMessageText(text);
 
+      // Кнопка копирования всего сообщения / размышления
       const copyBtn = document.createElement("button");
       copyBtn.className = "copy-btn";
       copyBtn.innerHTML = "📋";
       copyBtn.title = "Копировать";
-      copyBtn.onclick = () => {
+      copyBtn.onclick = (e) => {
+          e.stopPropagation();
           navigator.clipboard.writeText(text);
           copyBtn.innerHTML = "✅";
           setTimeout(() => copyBtn.innerHTML = "📋", 1500);
@@ -44,17 +46,45 @@
 
     formatMessageText(text) {
       const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-      const blocks = [];
-      let s = String(text).replace(/```([\s\S]*?)```/g, (_, code) => {
-        blocks.push(code);
-        return "\u0000B" + (blocks.length - 1) + "\u0000";
+
+      // 1. Извлекаем блоки ```...```, сохраняем их в массив и заменяем на плейсхолдеры
+      const codeBlocks = [];
+      let s = String(text).replace(/```(?:[a-zA-Z0-9_-]*\n)?([\s\S]*?)```/g, (match, code) => {
+        const id = "code-" + codeBlocks.length;
+        codeBlocks.push({ id, code });
+        return `\u0000CODE_BLOCK_${codeBlocks.length - 1}\u0000`;
       });
+
+      // 2. Экранируем HTML в оставшемся тексте
       s = esc(s);
+
+      // 3. Инлайн-код (одинарные бэктики)
       s = s.replace(/`([^`\n]+)`/g, (_, c) => '<span class="msg-inline-code">' + c + "</span>");
-      s = s.replace(/\u0000B(\d+)\u0000/g, (_, i) => {
-        return '<span class="msg-code">' + esc(blocks[Number(i)]) + "</span>";
+
+      // 4. Возвращаем блоки кода с оберткой, содержащей кнопку копирования
+      s = s.replace(/\u0000CODE_BLOCK_(\d+)\u0000/g, (_, i) => {
+        const block = codeBlocks[Number(i)];
+        const escapedCode = esc(block.code);
+        // Кнопка копирования кода
+        const copyBtn = `<button class="copy-code-btn" data-code="${encodeURIComponent(block.code)}">📋</button>`;
+        return `<div class="code-container">${copyBtn}<pre class="msg-code">${escapedCode}</pre></div>`;
       });
+
       return s;
+    },
+
+    // Обработчик для динамически созданных кнопок копирования кода
+    initCopyButtons(root) {
+      root.querySelectorAll('.copy-code-btn').forEach(btn => {
+        btn.onclick = (e) => {
+          e.stopPropagation();
+          const code = decodeURIComponent(btn.getAttribute('data-code') || '');
+          navigator.clipboard.writeText(code);
+          const originalHtml = btn.innerHTML;
+          btn.innerHTML = "✅";
+          setTimeout(() => btn.innerHTML = originalHtml, 1500);
+        };
+      });
     },
 
     setTyping(el, on) {
@@ -69,6 +99,8 @@
       el.innerHTML = this.formatMessageText(text);
       if (meta) el.appendChild(meta);
       if (copy) el.appendChild(copy);
+      // Инициализируем кнопки копирования кода
+      this.initCopyButtons(el);
     },
 
     nowTime() {
@@ -181,10 +213,8 @@
     getTabDisplayInfo(tabId, tabs, browsers) {
       const tabIndex = tabs.findIndex(t => t.tabId === tabId);
       if (tabIndex < 0) return `tab-${tabId.substring(0, 8)}`;
-
       const browser = browsers[tabIndex];
       const browserName = browser ? browser.displayName : "Browser";
-
       return `#${tabIndex} ${browserName} (${tabId.substring(0, 8)}...)`;
     },
 
