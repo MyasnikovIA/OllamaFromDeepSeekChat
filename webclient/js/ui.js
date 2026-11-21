@@ -86,7 +86,7 @@
         return;
       }
 
-      tabs.forEach((t) => {
+      tabs.forEach((t, index) => {
         const li = document.createElement("li");
         li.className = "tab-item" + (t.tabId === activeTabId ? " active" : "");
 
@@ -99,7 +99,7 @@
 
         const id = document.createElement("div");
         id.className = "tab-id";
-        id.textContent = t.tabId || "(unknown)";
+        id.textContent = `#${index} ${t.tabId.substring(0, 8)}...`;
 
         const flags = document.createElement("div");
         flags.className = "tab-flags";
@@ -118,13 +118,12 @@
         li.appendChild(avatar);
         li.appendChild(meta);
 
-        // Кнопка закрытия (крестик)
         const closeBtn = document.createElement("button");
         closeBtn.className = "close-tab-btn";
         closeBtn.innerHTML = "✕";
         closeBtn.title = "Закрыть вкладку";
         closeBtn.onclick = (e) => {
-            e.stopPropagation(); // Предотвращаем выбор вкладки
+            e.stopPropagation();
             onClose(t.tabId);
         };
         li.appendChild(closeBtn);
@@ -147,7 +146,7 @@
 
       browsers.forEach((b) => {
         const li = document.createElement("li");
-        li.className = "tab-item";
+        li.className = "tab-item browser-item";
         li.title = b.userDataDir;
 
         const avatar = document.createElement("div");
@@ -177,6 +176,23 @@
         li.addEventListener("click", () => onSelect(b.index));
         listEl.appendChild(li);
       });
+    },
+
+    getTabDisplayInfo(tabId, tabs, browsers) {
+      const tabIndex = tabs.findIndex(t => t.tabId === tabId);
+      if (tabIndex < 0) return `tab-${tabId.substring(0, 8)}`;
+
+      const browser = browsers[tabIndex];
+      const browserName = browser ? browser.displayName : "Browser";
+
+      return `#${tabIndex} ${browserName} (${tabId.substring(0, 8)}...)`;
+    },
+
+    removeTabUI(tabId, tabContainers) {
+      if (tabContainers[tabId]) {
+        tabContainers[tabId].remove();
+        delete tabContainers[tabId];
+      }
     },
 
     _flag(icon, on) {

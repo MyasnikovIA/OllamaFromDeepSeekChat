@@ -204,7 +204,7 @@ input, textarea { font-family: inherit; }
 .tab-item {
   display: flex; align-items: center; gap: 10px; padding: 10px 20px;
   cursor: pointer; transition: background .12s; border-left: 3px solid transparent;
-  position: relative; /* Для абсолютного позиционирования крестика */
+  position: relative;
 }
 .tab-item.browser-item {
   cursor: pointer;

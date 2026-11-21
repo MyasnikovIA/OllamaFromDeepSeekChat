@@ -40,7 +40,6 @@
           if (!thoughtEl) {
             thoughtEl = UI.appendMessage(this.els.messages, "", "thought", "");
             thoughtEl.textContent = "";
-            // Вставляем блок размышлений ПЕРЕД текущим ответом
             this.els.messages.insertBefore(thoughtEl.parentNode, typing.parentNode);
           }
           UI.updateTypingText(thoughtEl, accThought);
@@ -62,7 +61,7 @@
       stream.onError((err) => {
         UI.setTyping(typing, false);
         if (!accResponse && !accThought) {
-            typing.parentNode.remove(); // Удаляем пустой пузырь
+            typing.parentNode.remove();
         }
         UI.appendMessage(this.els.messages, "Ошибка: " + (err.message || err), "error");
         this._finish();

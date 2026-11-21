@@ -180,22 +180,46 @@
 
   function renderTabs() {
     UI.renderTabs(els.tabsList, state.tabs, state.activeTabId, selectAndRefresh, async (tabId) => {
-      // Закрытие вкладки
       try {
         await state.api.cmd("closeTab", { tabId });
-        // После закрытия ждем обновления
+
+        // Мгновенно убираем UI-элементы
+        UI.removeTabUI(tabId, state.tabContainers);
+        delete state.tabControllers[tabId];
+
+        // Если закрыли активную вкладку — сбрасываем активную
+        if (state.activeTabId === tabId) {
+          state.activeTabId = null;
+          els.chatTitle.textContent = "Чат";
+          els.chatSubtitle.textContent = "нет активной вкладки";
+          els.messagesContainer.innerHTML = "";
+        }
+
+        // Удаляем из локального массива
+        state.tabs = state.tabs.filter(t => t.tabId !== tabId);
+        renderTabs(); // Перерисовываем без удаленной
+
+        // Синхронизация с сервером
         setTimeout(() => refreshAll().catch(() => {}), 1000);
+
       } catch (e) {
         alert("Ошибка закрытия вкладки: " + e.message);
+        refreshAll().catch(() => {});
       }
     });
 
     if (state.activeTabId) {
       const t = state.tabs.find(x => x.tabId === state.activeTabId);
-      const think  = state.modes.thinking    ? " 🧠" : "";
-      const search = state.modes.smartSearch ? " 🔍" : "";
-      els.chatTitle.textContent = "Чат";
-      els.chatSubtitle.textContent = t ? (t.tabId + think + search) : "нет активной вкладки";
+      if (t) {
+        const displayInfo = UI.getTabDisplayInfo(state.activeTabId, state.tabs, state.browsers);
+        const think  = state.modes.thinking    ? " 🧠" : "";
+        const search = state.modes.smartSearch ? " 🔍" : "";
+        els.chatTitle.textContent = "Чат";
+        els.chatSubtitle.textContent = displayInfo + think + search;
+      } else {
+        els.chatTitle.textContent = "Чат";
+        els.chatSubtitle.textContent = "нет активной вкладки";
+      }
     } else {
       els.chatTitle.textContent = "Чат";
       els.chatSubtitle.textContent = "нет активной вкладки";
@@ -206,7 +230,6 @@
     UI.renderBrowsers(els.browsersList, state.browsers, async (index) => {
       try {
         await state.api.openBrowser(index);
-        // Ждем, пока сервер запустит Chrome
         setTimeout(() => refreshAll().catch(() => {}), 3000);
       } catch (e) {
         alert("Ошибка запуска браузера: " + e.message);
