@@ -11,203 +11,214 @@ import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.Locale;
 
 /**
- * Единая точка чтения настроек приложения.
+ * Загрузчик config.json.
  *
- * Настройки хранятся в JSON-файле config.json (путь можно задать
- * через --config=<path> или --config <path>). Допускаются комментарии:
- *   // однострочный
- *   #  однострочный
- *   /* многострочный *\/
- *
- * Если файла нет — он создаётся с настройками по умолчанию.
- * Если JSON битый — печатается проблемная строка с комментарием,
- * и работа приложения завершается с кодом 1.
+ * Поведение:
+ *   1) Если файла нет — создаётся шаблон с комментариями по указанному
+ *      пути (создаются и родительские каталоги), затем грузится.
+ *   2) Если файл пустой — перезаписывается шаблоном.
+ *   3) Перед парсингом из текста удаляются комментарии
+ *      (// до конца строки и /* ... *\/), при этом содержимое строковых
+ *      литералов ("...") не затрагивается — поэтому "https://..." и
+ *      экранированные кавычки \" внутри строк работают корректно.
+ *   4) chromePathWindows / chromePathLinux — путь к браузеру.
+ *      Пусто (""/null) — авто-поиск Chrome, иначе системный браузер.
+ *   5) browsers — массив профилей (--user-data-dir). Каждая запись —
+ *      отдельный экземпляр. Допустимы строки либо {"userDataDir": "..."}.
  */
 public final class Config {
 
-    // ---- defaults ----
-    public static final int     DEFAULT_PORT                = 11434;
-    public static final long    DEFAULT_WATCHDOG_TIMEOUT_MS = 120_000L;
-    public static final long    DEFAULT_MAX_FILE_BYTES      = 20L * 1024 * 1024;
-    public static final long    DEFAULT_MAX_TOTAL_BYTES     = 50L * 1024 * 1024;
-    public static final int     DEFAULT_CONSOLE_WIDTH       = 120;
-    public static final boolean DEFAULT_DEBUG               = false;
-    public static final String  DEFAULT_DEEPSEEK_URL        = "https://chat.deepseek.com/";
-    public static final String  DEFAULT_MODEL_NAME          = "DeepSeekCloud";
+    public static final int DEFAULT_PORT = 11434;
 
-    private static volatile Config INSTANCE;
+    private static volatile Config INSTANCE = null;
 
-    private final int     port;
-    private final long    watchdogTimeoutMs;
-    private final long    maxFileBytes;
-    private final long    maxTotalBytes;
-    private final int     consoleWidth;
-    private final boolean debug;
-    private final String  extensionDir;
-    private final String  deepseekUrl;
-    private final String  modelName;
-    private final List<BrowserConfig> browsers;
-    private final String  mailClientUrl;
-    private final String  mailAdminUrl;
+    // ============================================================
+    //  Шаблон config.json (создаётся при первом запуске / если файл пуст).
+    //  Прямые слеши '/' в путях работают и на Windows, и на Linux.
+    // ============================================================
+    private static final String DEFAULT_CONFIG_TEMPLATE = """
+{
+    // HTTP-порт сервера (Ollama API + bridge)
+    "port": 11434,
 
-    private Config(int port,
-                   long watchdogTimeoutMs,
-                   long maxFileBytes,
-                   long maxTotalBytes,
-                   int consoleWidth,
-                   boolean debug,
-                   String extensionDir,
-                   String deepseekUrl,
-                   String modelName,
-                   List<BrowserConfig> browsers,
-                   String mailClientUrl,
-                   String mailAdminUrl) {
-        this.port              = port;
-        this.watchdogTimeoutMs = watchdogTimeoutMs;
-        this.maxFileBytes      = maxFileBytes;
-        this.maxTotalBytes     = maxTotalBytes;
-        this.consoleWidth      = consoleWidth;
-        this.debug             = debug;
-        this.extensionDir      = extensionDir;
-        this.deepseekUrl       = deepseekUrl;
-        this.modelName         = modelName;
-        this.browsers          = Collections.unmodifiableList(browsers);
-        this.mailClientUrl     = mailClientUrl;
-        this.mailAdminUrl      = mailAdminUrl;
-    }
+    // Таймаут watchdog: сколько ждём stream-done от браузера (мс)
+    "watchdogTimeoutMs": 120000,
 
-    // ---- getters ----
-    public int     getPort()              { return port; }
-    public long    getWatchdogTimeoutMs() { return watchdogTimeoutMs; }
-    public long    getMaxFileBytes()      { return maxFileBytes; }
-    public long    getMaxTotalBytes()     { return maxTotalBytes; }
-    public int     getConsoleWidth()      { return consoleWidth; }
-    public boolean isDebug()              { return debug; }
-    public String  getExtensionDir()      { return extensionDir; }
-    public String  getDeepseekUrl()       { return deepseekUrl; }
-    public String  getModelName()         { return modelName; }
-    public List<BrowserConfig> getBrowsers() { return browsers; }
-    public String  getMailClientUrl()     { return mailClientUrl; }
-    public String  getMailAdminUrl()      { return mailAdminUrl; }
+    // Максимальный размер одного вложения (байт)
+    "maxFileBytes": 20971520,
 
-    // ---- singleton ----
+    // Максимальный суммарный размер всех вложений (байт)
+    "maxTotalBytes": 52428800,
+
+    /* Ширина консоли для word-wrap.
+       Приоритет: -Dds.console.width > env COLUMNS > это значение. */
+    "consoleWidth": 120,
+
+    // Печатать входящие JSON-запросы (или задайте --debug)
+    "debug": false,
+
+    // URL, который открывают браузеры (в режиме --app)
+    "deepseekUrl": "https://chat.deepseek.com/",
+
+    // Имя модели в Ollama / OpenAI API
+    "modelName": "DeepSeekCloud",
+
+    // Папка Chrome-расширения (null = не загружать; --extension= переопределяет)
+    "extensionDir": null,
+
+    /* ============================================================
+       ПУТЬ К ИСПОЛНЯЕМОМУ ФАЙЛУ БРАУЗЕРА.
+
+       • Если поле для текущей ОС пустое ("") или null — используется
+         браузер по умолчанию: сначала авто-поиск Chrome в стандартных
+         местах, если не найден — системный браузер (start/open/xdg-open).
+
+       • Если путь указан — используется ТОЛЬКО ОН. Этот же браузер
+         применяется и к DeepSeek-профилям (browsers), и к popup-окнам
+         почты (mailClientUrl / mailAdminUrl).
+
+       Прямые слеши '/' работают и на Windows — их можно не экранировать.
+
+       Примеры:
+         Windows: "C:/ChromeForTesting/chrome-win64/chrome.exe"
+                  "C:/Program Files/Google/Chrome/Application/chrome.exe"
+         Linux:   "/opt/google/chrome/chrome"
+                  "/usr/bin/google-chrome-stable"
+       ============================================================ */
+    "chromePathWindows": "",
+    "chromePathLinux": "",
+
+    /* ============================================================
+       СПИСОК ПРОФИЛЕЙ (--user-data-dir).
+
+       Каждая запись — ОТДЕЛЬНЫЙ запускаемый экземпляр браузера
+       (см. chromePathWindows/chromePathLinux) в режиме --app.
+       Сколько записей — столько будет запущено окон,
+       у каждого свой профиль.
+
+       Если указанный каталог ещё не существует — он будет создан
+       автоматически при запуске (вместе со всеми родительскими
+       каталогами).
+
+       Допустимы две эквивалентные формы записи:
+         "browsers": ["C:/Chrome_Profiles/User1", "C:/Chrome_Profiles/User2"]
+         "browsers": [
+             {"userDataDir": "C:/Chrome_Profiles/User1"},
+             {"userDataDir": "C:/Chrome_Profiles/User2"}
+         ]
+
+       Пустой массив [] = открыть ОДИН экземпляр в профиле по умолчанию
+       (без --user-data-dir).
+
+       Примеры путей:
+         Windows: "C:/Chrome_Profiles/User1"
+         Linux:   "/home/user/.chrome-profiles/User1"
+       ============================================================ */
+    "browsers": [],
+
+    /* Почтовый клиент — открывается ОТДЕЛЬНЫМ окном в ОБЫЧНОМ режиме
+       (с адресной строкой, без --app=), в браузере из
+       chromePathWindows/chromePathLinux. Использует профиль по умолчанию
+       (без --user-data-dir). null или "" = не открывать.
+       Например: "https://mail.smwrap.ru/webmail" */
+    "mailClientUrl": null,
+
+    /* Админка почты — аналогично (обычный режим, без своего профиля).
+       Например: "https://mail.smwrap.ru/admin/login" */
+    "mailAdminUrl": null
+}
+""";
+
+    // -------- поля конфигурации --------
+    private int     port              = DEFAULT_PORT;
+    private long    watchdogTimeoutMs = 120_000L;
+    private long    maxFileBytes      = 20L * 1024 * 1024;
+    private long    maxTotalBytes     = 50L * 1024 * 1024;
+    private int     consoleWidth      = 120;
+    private boolean debug             = false;
+    private String  modelName         = "DeepSeekCloud";
+    private String  deepseekUrl       = "https://chat.deepseek.com/";
+    private String  mailClientUrl     = "";
+    private String  mailAdminUrl      = "";
+    private String  extensionDir      = "";
+
+    private String  chromePathWindows = "";
+    private String  chromePathLinux   = "";
+
+    private List<BrowserConfig> browsers = Collections.emptyList();
+
+    private Config() {}
+
     public static Config get() {
-        Config c = INSTANCE;
-        if (c == null) {
+        if (INSTANCE == null) {
             synchronized (Config.class) {
-                c = INSTANCE;
-                if (c == null) {
-                    c = createDefaults();
-                    INSTANCE = c;
-                }
+                if (INSTANCE == null) INSTANCE = new Config();
             }
         }
-        return c;
-    }
-
-    private static Config createDefaults() {
-        return new Config(
-                DEFAULT_PORT,
-                DEFAULT_WATCHDOG_TIMEOUT_MS,
-                DEFAULT_MAX_FILE_BYTES,
-                DEFAULT_MAX_TOTAL_BYTES,
-                DEFAULT_CONSOLE_WIDTH,
-                DEFAULT_DEBUG,
-                null,
-                DEFAULT_DEEPSEEK_URL,
-                DEFAULT_MODEL_NAME,
-                new ArrayList<>(),
-                null,
-                null);
+        return INSTANCE;
     }
 
     // ============================================================
-    //  Loading
+    //  Загрузка
     // ============================================================
-    public static Config load(File file) throws IOException, JSONException {
-        if (file == null) file = new File("config.json");
+    public static synchronized void load(File file) throws IOException {
+        Config c = new Config();
 
-        if (!file.exists()) {
-            Files.writeString(file.toPath(), defaultJsonText(), StandardCharsets.UTF_8);
+        if (file == null) {
+            synchronized (Config.class) { INSTANCE = c; }
+            return;
+        }
+
+        boolean created = false;
+
+        if (!file.isFile()) {
+            writeDefaultConfig(file);
+            created = true;
+        }
+
+        String raw = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
+
+        if (raw.isBlank()) {
+            writeDefaultConfig(file);
+            raw = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
+            created = true;
+        }
+
+        if (created) {
             System.out.println("[CONFIG] created default config: " + file.getAbsolutePath());
         }
 
-        String original = Files.readString(file.toPath(), StandardCharsets.UTF_8);
-        String stripped = stripComments(original);
+        // Удаляем комментарии — org.json их не понимает.
+        String json = stripJsonComments(raw);
 
-        JSONObject json;
+        JSONObject obj;
         try {
-            json = new JSONObject(stripped);
+            obj = new JSONObject(json);
         } catch (JSONException e) {
-            printJsonError(original, stripped, e);
+            printJsonError(json, e);
             throw e;
         }
-
-        Config cfg = fromJson(json);
-        INSTANCE = cfg;
-        System.out.println("[CONFIG] loaded: " + file.getAbsolutePath()
-                + " (port=" + cfg.port
-                + ", model=" + cfg.modelName
-                + ", debug=" + cfg.debug
-                + ", browsers=" + cfg.browsers.size() + ")");
-        return cfg;
+        c.parseFromJson(obj);
+        synchronized (Config.class) { INSTANCE = c; }
     }
 
-    private static Config fromJson(JSONObject json) {
-        int     port       = json.optInt("port", DEFAULT_PORT);
-        long    watchdog   = json.optLong("watchdogTimeoutMs", DEFAULT_WATCHDOG_TIMEOUT_MS);
-        long    maxFile    = json.optLong("maxFileBytes", DEFAULT_MAX_FILE_BYTES);
-        long    maxTotal   = json.optLong("maxTotalBytes", DEFAULT_MAX_TOTAL_BYTES);
-        int     width      = json.optInt("consoleWidth", DEFAULT_CONSOLE_WIDTH);
-        boolean debug      = json.optBoolean("debug", DEFAULT_DEBUG);
-        String  extDir     = json.isNull("extensionDir") ? null : json.optString("extensionDir", null);
-        String  url        = json.optString("deepseekUrl", DEFAULT_DEEPSEEK_URL);
-        String  model      = json.optString("modelName", DEFAULT_MODEL_NAME);
-        String  mailClient = json.isNull("mailClientUrl") ? null : json.optString("mailClientUrl", null);
-        String  mailAdmin  = json.isNull("mailAdminUrl")  ? null : json.optString("mailAdminUrl",  null);
+    /**
+     * Удаляет из текста JSON-комментарии:
+     *   // ... до конца строки
+     *   /* ... *\/
+     * При этом строковые литералы ("...") обрабатываются как атомарные
+     * (с учётом экранирования \"), поэтому "https://..." и
+     * "/* not a comment *\/" внутри строк не трогаются.
+     *
+     * Символы перевода строки сохраняются, чтобы номера строк в
+     * сообщениях об ошибках оставались осмысленными.
+     */
+    static String stripJsonComments(String src) {
+        if (src == null || src.isEmpty()) return src;
 
-        if (port <= 0 || port > 65535) port = DEFAULT_PORT;
-        if (width < 40) width = DEFAULT_CONSOLE_WIDTH;
-        if (watchdog <= 0) watchdog = DEFAULT_WATCHDOG_TIMEOUT_MS;
-        if (maxFile  <= 0) maxFile  = DEFAULT_MAX_FILE_BYTES;
-        if (maxTotal <= 0) maxTotal = DEFAULT_MAX_TOTAL_BYTES;
-        if (url   == null || url.isEmpty())   url   = DEFAULT_DEEPSEEK_URL;
-        if (model == null || model.isEmpty()) model = DEFAULT_MODEL_NAME;
-
-        // browsers[]
-        List<BrowserConfig> browsers = new ArrayList<>();
-        JSONArray arr = json.optJSONArray("browsers");
-        if (arr != null) {
-            for (int i = 0; i < arr.length(); i++) {
-                JSONObject b = arr.optJSONObject(i);
-                if (b == null) continue;
-                String name = b.optString("name", "browser-" + (i + 1));
-                String path = b.isNull("path")        ? null : b.optString("path", null);
-                String udd  = b.isNull("userDataDir") ? null : b.optString("userDataDir", null);
-                if (path == null || path.isEmpty()) {
-                    System.err.println("[CONFIG] browsers[" + i + "] has no 'path', skipped");
-                    continue;
-                }
-                browsers.add(new BrowserConfig(name, path, udd));
-            }
-        }
-
-        return new Config(port, watchdog, maxFile, maxTotal, width, debug,
-                extDir, url, model, browsers, mailClient, mailAdmin);
-    }
-
-    // ============================================================
-    //  Comment stripping
-    //
-    //  Каждый символ комментария заменяется пробелом, переводы строк
-    //  сохраняются — позиции (line/col) не сдвигаются, поэтому
-    //  ошибки org.json напрямую проецируются на оригинальный текст.
-    // ============================================================
-    static String stripComments(String src) {
         StringBuilder out = new StringBuilder(src.length());
         int i = 0, n = src.length();
         boolean inString = false;
@@ -215,6 +226,8 @@ public final class Config {
         while (i < n) {
             char c = src.charAt(i);
 
+            // Внутри строкового литерала — копируем всё как есть,
+            // учитывая экранированные символы (\", \\, \n и т.п.).
             if (inString) {
                 out.append(c);
                 if (c == '\\' && i + 1 < n) {
@@ -227,151 +240,140 @@ public final class Config {
                 continue;
             }
 
-            if (c == '"') { inString = true; out.append(c); i++; continue; }
+            // Начало строкового литерала
+            if (c == '"') {
+                inString = true;
+                out.append(c);
+                i++;
+                continue;
+            }
 
-            if (c == '/' && i + 1 < n && src.charAt(i + 1) == '/') {
-                while (i < n && src.charAt(i) != '\n') { out.append(' '); i++; }
-                continue;
-            }
-            if (c == '#') {
-                while (i < n && src.charAt(i) != '\n') { out.append(' '); i++; }
-                continue;
-            }
-            if (c == '/' && i + 1 < n && src.charAt(i + 1) == '*') {
-                out.append(' ').append(' ');
-                i += 2;
-                while (i < n) {
-                    if (i + 1 < n && src.charAt(i) == '*' && src.charAt(i + 1) == '/') {
-                        out.append(' ').append(' ');
-                        i += 2;
-                        break;
-                    }
-                    char cc = src.charAt(i);
-                    out.append(cc == '\n' ? '\n' : ' ');
-                    i++;
+            // Комментарии
+            if (c == '/' && i + 1 < n) {
+                char c2 = src.charAt(i + 1);
+
+                // // — до конца строки (перевод строки оставляем)
+                if (c2 == '/') {
+                    i += 2;
+                    while (i < n && src.charAt(i) != '\n') i++;
+                    continue;
                 }
-                continue;
+
+                // /* ... */ — до закрывающего */ (переводы строк внутри
+                // комментария превращаем в '\n', чтобы сохранить нумерацию)
+                if (c2 == '*') {
+                    i += 2;
+                    while (i + 1 < n
+                            && !(src.charAt(i) == '*' && src.charAt(i + 1) == '/')) {
+                        if (src.charAt(i) == '\n') out.append('\n');
+                        i++;
+                    }
+                    i += 2; // пропускаем "*/"
+                    continue;
+                }
             }
+
             out.append(c);
             i++;
         }
         return out.toString();
     }
 
-    // ============================================================
-    //  Error highlighting
-    // ============================================================
-    private static final Pattern LINE_PATTERN = Pattern.compile("line (\\d+)");
-    private static final Pattern AT_PATTERN   = Pattern.compile("at (\\d+)");
+    /** Пишет шаблон config.json по указанному пути (создаёт каталоги). */
+    private static void writeDefaultConfig(File file) throws IOException {
+        File abs = file.getAbsoluteFile();
+        File parent = abs.getParentFile();
+        if (parent != null && !parent.exists()) {
+            parent.mkdirs();
+        }
+        Files.write(abs.toPath(),
+                DEFAULT_CONFIG_TEMPLATE.getBytes(StandardCharsets.UTF_8));
+    }
 
-    static void printJsonError(String original, String stripped, JSONException e) {
-        String msg = (e.getMessage() == null) ? "unknown error" : e.getMessage();
+    private static void printJsonError(String text, JSONException e) {
+        String msg = e.getMessage() == null ? "" : e.getMessage();
+        System.err.println("[CONFIG] JSON parse error: " + msg);
 
-        int line   = -1;
-        int offset = -1;
-        Matcher lm = LINE_PATTERN.matcher(msg);
-        if (lm.find()) line = Integer.parseInt(lm.group(1)) - 1;
-        Matcher om = AT_PATTERN.matcher(msg);
-        if (om.find()) offset = Integer.parseInt(om.group(1));
+        // org.json выдаёт "... at N [character C line L]"
+        int idx = -1;
+        try {
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("at (\\d+)").matcher(msg);
+            if (m.find()) idx = Integer.parseInt(m.group(1));
+        } catch (Exception ignored) {}
+        if (idx < 0) return;
 
-        String[] lines = original.split("\n", -1);
+        int from = Math.max(0, idx - 40);
+        int to   = Math.min(text.length(), idx + 40);
+        if (from < to) {
+            System.err.println("[CONFIG] context: ..."
+                    + text.substring(from, to).replace("\n", "\\n")
+                    + "...");
+        }
+    }
 
-        if (line < 0 && offset >= 0) {
-            int pos = 0;
-            for (int i = 0; i < lines.length; i++) {
-                if (pos + lines[i].length() >= offset) { line = i; break; }
-                pos += lines[i].length() + 1;
+    private void parseFromJson(JSONObject obj) {
+        port              = obj.optInt("port", DEFAULT_PORT);
+        watchdogTimeoutMs = obj.optLong("watchdogTimeoutMs", watchdogTimeoutMs);
+        maxFileBytes      = obj.optLong("maxFileBytes", maxFileBytes);
+        maxTotalBytes     = obj.optLong("maxTotalBytes", maxTotalBytes);
+        consoleWidth      = obj.optInt("consoleWidth", consoleWidth);
+        debug             = obj.optBoolean("debug", debug);
+        modelName         = obj.optString("modelName", modelName);
+        deepseekUrl       = obj.optString("deepseekUrl", deepseekUrl);
+        mailClientUrl     = obj.optString("mailClientUrl", "");
+        mailAdminUrl      = obj.optString("mailAdminUrl", "");
+        extensionDir      = obj.optString("extensionDir", "");
+
+        chromePathWindows = obj.optString("chromePathWindows", "");
+        chromePathLinux   = obj.optString("chromePathLinux", "");
+
+        List<BrowserConfig> list = new ArrayList<>();
+        JSONArray arr = obj.optJSONArray("browsers");
+        if (arr != null) {
+            for (int i = 0; i < arr.length(); i++) {
+                Object o = arr.opt(i);
+                if (o instanceof String) {
+                    list.add(new BrowserConfig((String) o));
+                } else if (o instanceof JSONObject) {
+                    JSONObject jo = (JSONObject) o;
+                    String dir    = jo.optString("userDataDir", "");
+                    if (!dir.isEmpty()) list.add(new BrowserConfig(dir));
+                }
             }
         }
-        if (line < 0) line = 0;
-
-        int start = Math.max(0, line - 3);
-        int end   = Math.min(lines.length, line + 4);
-
-        System.err.println();
-        System.err.println("[CONFIG] ========== JSON parse error ==========");
-        System.err.println("[CONFIG] " + msg);
-        System.err.println("[CONFIG] around line " + (line + 1) + ":");
-        System.err.println("[CONFIG] ----------------------------------------");
-        for (int i = start; i < end; i++) {
-            String marker = (i == line) ? " >>> " : "     ";
-            System.err.println(marker + String.format("%3d", i + 1) + " | " + lines[i]);
-        }
-        System.err.println("[CONFIG] ----------------------------------------");
-        System.err.println("[CONFIG] Fix the highlighted line and restart.");
-        System.err.println("[CONFIG] ========================================");
-        System.err.println();
+        browsers = Collections.unmodifiableList(list);
     }
 
     // ============================================================
-    //  Default config template
+    //  Геттеры
     // ============================================================
-    private static String defaultJsonText() {
-        StringBuilder sb = new StringBuilder();
-        sb.append("{\n");
-        sb.append("    // HTTP-порт сервера (Ollama API + bridge)\n");
-        sb.append("    \"port\": 11434,\n");
-        sb.append("\n");
-        sb.append("    // Таймаут watchdog: сколько ждём stream-done от браузера (мс)\n");
-        sb.append("    \"watchdogTimeoutMs\": 120000,\n");
-        sb.append("\n");
-        sb.append("    // Максимальный размер одного вложения (байт)\n");
-        sb.append("    \"maxFileBytes\": 20971520,\n");
-        sb.append("\n");
-        sb.append("    // Максимальный суммарный размер всех вложений (байт)\n");
-        sb.append("    \"maxTotalBytes\": 52428800,\n");
-        sb.append("\n");
-        sb.append("    /* Ширина консоли для word-wrap.\n");
-        sb.append("       Приоритет: -Dds.console.width > env COLUMNS > это значение. */\n");
-        sb.append("    \"consoleWidth\": 120,\n");
-        sb.append("\n");
-        sb.append("    // Печатать входящие JSON-запросы (или задайте --debug)\n");
-        sb.append("    \"debug\": false,\n");
-        sb.append("\n");
-        sb.append("    // URL, который открывают браузеры (в режиме --app)\n");
-        sb.append("    \"deepseekUrl\": \"https://chat.deepseek.com/\",\n");
-        sb.append("\n");
-        sb.append("    // Имя модели в Ollama / OpenAI API\n");
-        sb.append("    \"modelName\": \"DeepSeekCloud\",\n");
-        sb.append("\n");
-        sb.append("    // Папка Chrome-расширения (null = не загружать; --extension= переопределяет)\n");
-        sb.append("    \"extensionDir\": null,\n");
-        sb.append("\n");
-        sb.append("    /* ============================================================\n");
-        sb.append("       Список браузеров для автоматического запуска.\n");
-        sb.append("       Каждый браузер открывается на deepseekUrl в режиме --app\n");
-        sb.append("       (без адресной строки и вкладок) со своим профилем\n");
-        sb.append("       --user-data-dir. Пустой массив = авто-поиск Chrome.\n");
-        sb.append("\n");
-        sb.append("       Внимание: прямые слеши '/' работают и на Windows\n");
-        sb.append("       (Chrome и java.io.File их понимают).\n");
-        sb.append("\n");
-        sb.append("       Пример Windows:\n");
-        sb.append("         {\"name\":\"User1\",\n");
-        sb.append("          \"path\":\"C:/Program Files/Google/Chrome/Application/chrome.exe\",\n");
-        sb.append("          \"userDataDir\":\"C:/Chrome_Profiles/User1\"}\n");
-        sb.append("\n");
-        sb.append("       Пример Linux:\n");
-        sb.append("         {\"name\":\"User1\",\n");
-        sb.append("          \"path\":\"/usr/bin/google-chrome\",\n");
-        sb.append("          \"userDataDir\":\"/home/user/.chrome-profiles/User1\"}\n");
-        sb.append("\n");
-        sb.append("       Пример macOS:\n");
-        sb.append("         {\"name\":\"User1\",\n");
-        sb.append("          \"path\":\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\",\n");
-        sb.append("          \"userDataDir\":\"/Users/user/.chrome-profiles/User1\"}\n");
-        sb.append("       ============================================================ */\n");
-        sb.append("    \"browsers\": [],\n");
-        sb.append("\n");
-        sb.append("    /* Почтовый клиент — открывается отдельным --app окном\n");
-        sb.append("       без своего --user-data-dir. null или \"\" = не открывать.\n");
-        sb.append("       Например: \"https://mail.smwrap.ru/webmail\" */\n");
-        sb.append("    \"mailClientUrl\": null,\n");
-        sb.append("\n");
-        sb.append("    /* Админка почты — аналогично (без своего профиля).\n");
-        sb.append("       Например: \"https://mail.smwrap.ru/admin/login\" */\n");
-        sb.append("    \"mailAdminUrl\": null\n");
-        sb.append("}\n");
-        return sb.toString();
+    public int     getPort()              { return port; }
+    public long    getWatchdogTimeoutMs() { return watchdogTimeoutMs; }
+    public long    getMaxFileBytes()      { return maxFileBytes; }
+    public long    getMaxTotalBytes()     { return maxTotalBytes; }
+    public int     getConsoleWidth()      { return consoleWidth; }
+    public boolean isDebug()              { return debug; }
+    public String  getModelName()         { return modelName; }
+    public String  getDeepseekUrl()       { return deepseekUrl; }
+    public String  getMailClientUrl()     { return mailClientUrl; }
+    public String  getMailAdminUrl()      { return mailAdminUrl; }
+    public String  getExtensionDir()      { return extensionDir; }
+
+    public String  getChromePathWindows() { return chromePathWindows; }
+    public String  getChromePathLinux()   { return chromePathLinux; }
+
+    public List<BrowserConfig> getBrowsers() { return browsers; }
+
+    /** Путь к Chrome для текущей ОС; пустая строка — путь не задан. */
+    public String getChromePath() {
+        String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        if (os.contains("win")) {
+            return chromePathWindows == null ? "" : chromePathWindows.trim();
+        }
+        if (os.contains("nux") || os.contains("nix") || os.contains("aix")) {
+            return chromePathLinux == null ? "" : chromePathLinux.trim();
+        }
+        return "";
     }
 }

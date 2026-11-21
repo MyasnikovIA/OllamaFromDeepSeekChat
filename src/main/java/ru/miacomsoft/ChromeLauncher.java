@@ -31,11 +31,18 @@ public final class ChromeLauncher {
         OS os = detectOS();
         System.out.println("[CHROME] OS detected: " + os);
 
+        String configured = Config.get().getChromePath();
+        if (!configured.isEmpty()) {
+            System.out.println("[CHROME] configured path: " + configured);
+        } else {
+            System.out.println("[CHROME] configured path: (empty → auto-detect / default browser)");
+        }
+
         Config cfg = Config.get();
         List<BrowserConfig> browsers = cfg.getBrowsers();
 
         if (browsers == null || browsers.isEmpty()) {
-            System.out.println("[CHROME] browsers[] empty → auto-detect");
+            System.out.println("[CHROME] browsers[] empty → single default profile");
             fallbackAutoLaunch(os, cfg.getDeepseekUrl());
         } else {
             for (BrowserConfig bc : browsers) {
@@ -43,7 +50,7 @@ public final class ChromeLauncher {
             }
         }
 
-        // ---- popup-окна почты (если заданы) ----
+        // ---- popup-окна почты (в обычном режиме, с адресной строкой) ----
         if (isNonEmpty(cfg.getMailClientUrl())) {
             launchPopupUrl(cfg.getMailClientUrl(), os);
         }
@@ -52,7 +59,7 @@ public final class ChromeLauncher {
         }
     }
 
-    /** Открыть ещё одно окно DeepSeek (используется из /opentab при отсутствии активной вкладки). */
+    /** Открыть ещё одно окно DeepSeek (из /opentab при отсутствии активной вкладки). */
     public static void launchNewWindow(String url) {
         String target = (url == null || url.trim().isEmpty())
                 ? Config.get().getDeepseekUrl()
@@ -61,8 +68,6 @@ public final class ChromeLauncher {
 
         List<BrowserConfig> browsers = Config.get().getBrowsers();
         if (browsers != null && !browsers.isEmpty()) {
-            // Используем первый валидный профиль как «прототип»,
-            // но открываем в нём новый URL.
             for (BrowserConfig bc : browsers) {
                 if (bc.isValid()) {
                     launchBrowser(bc, os, target);
@@ -75,45 +80,39 @@ public final class ChromeLauncher {
 
     // ============================================================
     //  DeepSeek-окно одного профиля (режим --app + user-data-dir)
+    //  Браузер берётся из Config.getChromePath().
     // ============================================================
     static void launchBrowser(BrowserConfig bc, OS os, String url) {
         if (!bc.isValid()) {
             System.err.println("[CHROME] skip invalid browser entry: " + bc);
             return;
         }
-        String exe = resolveExecutable(bc.path);
+        String exe = pickExecutable(os);
         if (exe == null) {
-            System.err.println("[CHROME] executable not found [" + bc.name + "]: " + bc.path);
+            System.err.println("[CHROME] no chrome executable (config empty & auto-detect failed)"
+                    + " — opening default browser for: " + url);
+            openDefaultBrowser(os, url);
             return;
         }
 
         List<String> args = new ArrayList<>();
-        args.add("--no-first-run");
-        args.add("--no-default-browser-check");
+        // args.add("--no-first-run");
+        //args.add("--no-default-browser-check");
         args.add("--app=" + url);
         if (bc.userDataDir != null && !bc.userDataDir.isEmpty()) {
             args.add("--user-data-dir=" + bc.userDataDir);
         }
 
-        String extDir = System.getProperty("ds.extension.dir");
-        if (extDir == null) extDir = Config.get().getExtensionDir();
-        if (extDir != null && !extDir.isEmpty()) {
-            File f = new File(extDir);
-            if (f.isDirectory()) {
-                args.add("--load-extension=" + f.getAbsolutePath());
-            } else {
-                System.err.println("[CHROME] extension dir not found: " + extDir);
-            }
-        }
+        appendExtensionArg(args);
 
-        launch(exe, args, os, "[" + bc.name + "] " + url);
+        launch(exe, args, os, "[" + bc.displayName() + "] " + url);
     }
 
     // ============================================================
-    //  Fallback: авто-поиск Chrome, один профиль
+    //  Fallback: один экземпляр в профиле по умолчанию (--app).
     // ============================================================
     static void fallbackAutoLaunch(OS os, String url) {
-        String chrome = findChromeExecutable(os);
+        String chrome = pickExecutable(os);
         if (chrome == null) {
             System.out.println("[CHROME] Chrome not found, opening default browser");
             openDefaultBrowser(os, url);
@@ -130,23 +129,21 @@ public final class ChromeLauncher {
             args.add("--user-data-dir=" + new File(profileDir).getAbsolutePath());
         }
 
-        String extDir = System.getProperty("ds.extension.dir");
-        if (extDir == null) extDir = Config.get().getExtensionDir();
-        if (extDir != null && !extDir.isEmpty()) {
-            File f = new File(extDir);
-            if (f.isDirectory()) args.add("--load-extension=" + f.getAbsolutePath());
-        }
+        appendExtensionArg(args);
 
         launch(chrome, args, os, "[auto] " + url);
     }
 
     // ============================================================
-    //  Popup-окно для почты (--app, БЕЗ user-data-dir)
+    //  Popup-окно почты — ОБЫЧНЫЙ режим (с адресной строкой).
+    //  Браузер берётся из Config.getChromePath().
+    //  Никакого --app= и никакого --user-data-dir —
+    //  используется профиль по умолчанию запущенного браузера.
     // ============================================================
     static void launchPopupUrl(String url, OS os) {
-        String exe = pickChromeForPopup(os);
+        String exe = pickExecutable(os);
         if (exe == null) {
-            System.out.println("[CHROME] no browser for popup, using default: " + url);
+            System.out.println("[CHROME] no browser for mail popup, using default: " + url);
             openDefaultBrowser(os, url);
             return;
         }
@@ -154,22 +151,40 @@ public final class ChromeLauncher {
         List<String> args = new ArrayList<>();
         args.add("--no-first-run");
         args.add("--no-default-browser-check");
-        args.add("--app=" + url);
-        // НЕТ --user-data-dir → используется профиль по умолчанию.
+        // Обычный режим: открываем URL как есть.
+        args.add(url);
 
-        launch(exe, args, os, "[popup] " + url);
+        launch(exe, args, os, "[mail] " + url);
     }
 
-    static String pickChromeForPopup(OS os) {
-        List<BrowserConfig> browsers = Config.get().getBrowsers();
-        if (browsers != null && !browsers.isEmpty()) {
-            for (BrowserConfig bc : browsers) {
-                if (!bc.isValid()) continue;
-                String exe = resolveExecutable(bc.path);
-                if (exe != null) return exe;
-            }
+    // ============================================================
+    //  Выбор исполняемого файла
+    //  1) Если в config задан chromePath для текущей ОС — используем его.
+    //  2) Иначе — авто-поиск Chrome.
+    // ============================================================
+    static String pickExecutable(OS os) {
+        String configured = Config.get().getChromePath();
+        if (configured != null && !configured.isEmpty()) {
+            String resolved = resolveExecutable(configured);
+            if (resolved != null) return resolved;
+            System.err.println("[CHROME] configured chrome path not found: " + configured
+                    + " — falling back to auto-detect");
         }
         return findChromeExecutable(os);
+    }
+
+    /** Добавляет --load-extension= если extensionDir задан (property → config). */
+    static void appendExtensionArg(List<String> args) {
+        String extDir = System.getProperty("ds.extension.dir");
+        if (extDir == null) extDir = Config.get().getExtensionDir();
+        if (extDir != null && !extDir.isEmpty()) {
+            File f = new File(extDir);
+            if (f.isDirectory()) {
+                args.add("--load-extension=" + f.getAbsolutePath());
+            } else {
+                System.err.println("[CHROME] extension dir not found: " + extDir);
+            }
+        }
     }
 
     // ============================================================
@@ -186,7 +201,6 @@ public final class ChromeLauncher {
             pb.start();
         } catch (IOException e) {
             System.err.println("[CHROME] launch failed (" + label + "): " + e.getMessage());
-            // Fallback на URL без аргументов
             if (!args.isEmpty()) {
                 String appArg = null;
                 for (String a : args) {
@@ -197,14 +211,6 @@ public final class ChromeLauncher {
         }
     }
 
-    /**
-     * Разный механизм запуска по ОС:
-     *
-     *   Windows : прямой exec (ProcessBuilder)
-     *   Linux   : прямой exec
-     *   macOS   : если путь — .app-бандл, через `open -na <app> --args …`;
-     *             если это бинарь внутри бандла — прямой exec.
-     */
     static List<String> buildLaunchCommand(String exe, List<String> args, OS os) {
         List<String> cmd = new ArrayList<>();
         if (os == OS.MACOS && exe.toLowerCase(Locale.ROOT).endsWith(".app")) {
@@ -227,10 +233,8 @@ public final class ChromeLauncher {
         if (path == null || path.isEmpty()) return null;
         File f = new File(path);
         if (f.isFile() && f.canExecute()) return f.getAbsolutePath();
-        // Попробуем найти через PATH (полезно для Linux-случая "google-chrome")
         String p = which(path);
         if (p != null) return p;
-        // Не нашли — вернём null, чтобы вызывающий код залогировал ошибку.
         return null;
     }
 
@@ -257,7 +261,8 @@ public final class ChromeLauncher {
     static String findChromeMac() {
         String[] candidates = {
                 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-                System.getProperty("user.home") + "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                System.getProperty("user.home")
+                        + "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
                 "/Applications/Chromium.app/Contents/MacOS/Chromium"
         };
         for (String c : candidates) {
@@ -268,7 +273,8 @@ public final class ChromeLauncher {
     }
 
     static String findChromeLinux() {
-        for (String n : new String[]{"google-chrome", "google-chrome-stable", "chromium", "chromium-browser"}) {
+        for (String n : new String[]{
+                "google-chrome", "google-chrome-stable", "chromium", "chromium-browser"}) {
             String p = which(n);
             if (p != null) return p;
         }
@@ -277,8 +283,6 @@ public final class ChromeLauncher {
 
     static String which(String name) {
         if (name == null) return null;
-        // Если это абсолютный путь — уже проверено выше в resolveExecutable;
-        // для простых имён идём по PATH.
         String path = System.getenv("PATH");
         if (path == null) return null;
         for (String dir : path.split(File.pathSeparator)) {
@@ -289,7 +293,7 @@ public final class ChromeLauncher {
     }
 
     // ============================================================
-    //  Default browser (best effort, с адресной строкой)
+    //  Default browser (best effort)
     // ============================================================
     static void openDefaultBrowser(OS os, String url) {
         List<String> cmd = new ArrayList<>();
